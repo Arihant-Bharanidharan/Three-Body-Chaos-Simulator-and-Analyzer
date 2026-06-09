@@ -1,109 +1,140 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="Mapping Stability and Chaos in the Three-Body Problem" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-2563eb"></a>
+  <a href="https://github.com/Arihant-Bharanidharan/three-body-chaos-mapping/actions"><img alt="Validation" src="https://img.shields.io/github/actions/workflow/status/Arihant-Bharanidharan/three-body-chaos-mapping/validate.yml?branch=main&label=validation"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-64748b"></a>
+  <img alt="Research prototype" src="https://img.shields.io/badge/status-research%20prototype-f97316">
+  <img alt="Domain" src="https://img.shields.io/badge/domain-computational%20physics-7c3aed">
+</p>
+
 # Mapping Stability and Chaos in the Three-Body Problem
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-lightgrey)
-![Status](https://img.shields.io/badge/status-research%20prototype-orange)
-![Domain](https://img.shields.io/badge/domain-computational%20physics-purple)
+**A finite-time computational diagnostics framework for heterogeneous Newtonian three-body dynamics.**
 
-## Overview
+This repository studies stability and chaos indicators in the classical three-body problem using high-precision numerical integration, ensemble sampling, Lyapunov-spectrum diagnostics, reversibility tests, conservation-law checks, and claim-gated reporting.
 
-This project develops a high-precision numerical framework for finite-time stability and chaos diagnostics in the classical Newtonian three-body problem. It combines heterogeneous initial-condition sampling, full Lyapunov-spectrum estimation, reversibility testing, conservation-law validation, convergence checks, and claim-gated reporting.
+The goal is not to announce a new law of gravity or a universal stability boundary. The goal is sharper and more useful: build a reproducible research pipeline that turns raw trajectory behavior into conservative, quantitative, finite-time diagnostics.
 
-Core aim: move from qualitative labels such as "stable" or "chaotic" toward reproducible, quantitative, finite-time characterization of dynamical behavior across controlled three-body ensembles.
+## At A Glance
 
-## Research Goal
+| Component | What it does |
+| --- | --- |
+| `3BS-Simulator.py` | Main simulator and diagnostics engine |
+| `analyzer.py` | Analyzer for existing outputs, tables, figures, and reports |
+| REBOUND IAS15 | Preferred adaptive high-accuracy integrator |
+| Full Lyapunov spectrum | Estimates all 18 finite-time exponents, not just one number |
+| HCI | Normalized diagnostic embedding, not a physical invariant |
+| Figure-eight orbit | Benchmark/control only, not the production ensemble |
 
-To map ensemble-dependent stability and chaos indicators in Newtonian three-body dynamics using numerical and statistical diagnostics. The project is designed for computational nonlinear dynamics research, method validation, and reproducible phase-space exploration.
+## Why This Exists
 
-The framework does not claim a global stability map, a universal chaos law, a new solution to the three-body problem, or new gravitational physics.
+The three-body problem is simple to write down and hard to understand. Three masses, Newtonian gravity, and no general closed-form solution. Tiny changes in initial conditions can produce dramatically different finite-time behavior, but numerical artifacts can also masquerade as chaos.
 
-## Scientific Context
+This project is built around that distinction. It combines several independent diagnostics so that chaos-like behavior is not inferred from a single plot, a single exponent, or a single famous orbit.
 
-The three-body problem is a canonical nonlinear Hamiltonian system with no general closed-form solution. Small changes in initial conditions can produce large long-term deviations, making it a natural testbed for:
+## Scientific Scope
 
-- sensitivity to initial conditions
-- finite-time chaotic behavior
-- numerical reliability of adaptive integrators
-- conservation-law validation
-- ensemble-level structure in dynamical diagnostics
+This framework is designed for:
 
-## Features
+- finite-time chaos diagnostics
+- heterogeneous three-body ensemble studies
+- numerical validation of conservation laws
+- Lyapunov-spectrum and reversibility analysis
+- cautious computational nonlinear dynamics reporting
+
+This framework does not claim:
+
+- a global stability map of the three-body problem
+- a universal chaos law
+- a new solution to the three-body problem
+- new gravitational physics
+- exact regime boundaries from HCI thresholds
+
+## Dynamical Families
+
+Production runs use family-based sampling instead of repeated perturbations of one canonical orbit.
+
+| Family | Role |
+| --- | --- |
+| `random_bounded` | Default production family for bounded randomized triples |
+| `hierarchical_triple` | Inner binary plus distant tertiary |
+| `binary_scattering` | Bound binary with incoming intruder |
+| `unequal_mass` | Symmetry-broken mass-ratio systems |
+| `near_collision` | Close-encounter stress tests |
+| `figure8` | Benchmark/control for numerical validation only |
+
+## Diagnostic Stack
+
+```mermaid
+flowchart LR
+    A["Initial-condition family"] --> B["High-precision integration"]
+    B --> C["Lyapunov spectrum"]
+    B --> D["Energy and angular momentum"]
+    B --> E["Forward-reverse test"]
+    C --> F["Finite-time diagnostics"]
+    D --> F
+    E --> F
+    F --> G["HCI embedding"]
+    F --> H["Family-separated analysis"]
+    G --> I["Claim-gated reports"]
+    H --> I
+```
+
+## Core Features
 
 - REBOUND IAS15 support for adaptive high-accuracy integration
-- SciPy-based fallback and cross-validation pathways
-- heterogeneous initial-condition families:
-  - random bounded triples
-  - hierarchical triples
-  - binary scattering systems
-  - unequal-mass systems
-  - near-collision stress tests
-  - figure-eight benchmark/control runs
-- full 18-dimensional Lyapunov-spectrum diagnostics
+- SciPy fallback and cross-validation pathways
+- full 18D phase-space Lyapunov-spectrum diagnostics
 - Benettin/QR orthonormalization workflow
 - forward-reverse reversibility tests
 - energy and angular-momentum conservation diagnostics
-- Hamiltonian Chaos Index as a normalized diagnostic embedding, not a physical invariant
-- family-separated analysis and cautious regime summaries
+- family-separated ensemble analysis
+- large-run guard for ensemble sizes above 10,000
 - claim-gated paper/report generation
+- Markdown, LaTeX-ready, JSON, CSV, and figure outputs
 
-## Methodology
+## Hamiltonian Chaos Index
 
-### 1. Initial Conditions
+The Hamiltonian Chaos Index, or HCI, is a normalized diagnostic embedding built from:
 
-The default production mode is `random_bounded`, not the canonical figure-eight orbit. Figure-eight runs are treated only as benchmark/control cases for numerical validation.
+- largest finite-time Lyapunov exponent
+- reversibility error
+- energy drift
+- angular-momentum drift
 
-### 2. Integration
+HCI is useful for organizing runs inside an ensemble. It is not a Hamiltonian invariant, not a law of motion, and not an exact physical phase label.
 
-Trajectories are evolved with high-precision numerical integrators, with REBOUND IAS15 preferred when available. The pipeline tracks energy and angular momentum to separate physical sensitivity from numerical artifacts.
-
-### 3. Chaos Diagnostics
-
-The system estimates the full Lyapunov spectrum in the 18D phase space of three positions and three velocities. It also computes reversibility error, conservation-law drift, and finite-time diagnostic summaries.
-
-### 4. Ensemble Analysis
-
-Large runs use family-balanced sampling rather than repeated perturbations of one orbit. Ensemble sizes above 10,000 require explicit confirmation to prevent accidental expensive runs.
-
-### 5. Validation
-
-The framework supports tolerance checks, horizon scaling, perturbation-scale studies, QR orthogonality diagnostics, and comparison of Lyapunov-style estimates against simpler divergence indicators.
-
-## Getting Started
-
-### Requirements
-
-- Python 3.x
-- NumPy
-- SciPy
-- Matplotlib
-- REBOUND recommended for IAS15 integration
+## Quick Start
 
 ### Install
 
 ```powershell
-pip install numpy scipy matplotlib rebound
+python -m pip install -r requirements.txt
 ```
 
-### Run
+### Inspect commands
 
 ```powershell
-python three_body_chaos.py --help
+python 3BS-Simulator.py --help
 python analyzer.py --help
 ```
 
-Quick validation run:
+### Run a tiny validation sample
 
 ```powershell
-python three_body_chaos.py --quick --no-plots --ic-mode random_bounded --ensemble-size 10
+python 3BS-Simulator.py --quick --no-plots --ic-mode random_bounded --ensemble-size 10
 ```
 
-Large production-style run:
+### Run a larger production-style ensemble
 
 ```powershell
-python three_body_chaos.py --backend auto --ensemble-size 25000 --confirm-large-run --ic-mode random_bounded
+python 3BS-Simulator.py --backend auto --ensemble-size 25000 --confirm-large-run --ic-mode random_bounded
 ```
 
-Analyze existing outputs without rerunning simulations:
+### Analyze existing outputs without rerunning simulations
 
 ```powershell
 python analyzer.py --input outputs --output analysis_outputs --mode quick
@@ -111,33 +142,58 @@ python analyzer.py --input outputs --output analysis_outputs --mode quick
 
 ## Outputs
 
+Typical runs can produce:
+
 - trajectory and diagnostic plots
-- Lyapunov-spectrum summaries
-- energy and angular-momentum drift reports
+- full Lyapunov-spectrum summaries
+- largest-exponent estimates
+- energy-drift reports
+- angular-momentum drift reports
 - reversibility-error summaries
 - family comparison tables
+- HCI and exploratory clustering summaries
 - JSON and CSV analysis artifacts
-- Markdown and LaTeX-ready paper/report assets
+- Markdown and LaTeX-ready paper assets
 
-## Reproducibility
+## Reproducibility And Guardrails
 
 - deterministic seeds are supported
-- run configuration and source hashes are recorded
+- run configuration metadata is recorded
+- source hashes are recorded where available
+- large ensembles require explicit confirmation
 - figure-eight is reserved for benchmark/control use
-- HCI thresholds are diagnostic conventions, not exact physical boundaries
-- finite-time estimates should be interpreted with convergence diagnostics
+- finite-time estimates should be read with convergence diagnostics
+- reports are claim-gated to avoid overstatement
+
+## Project Layout
+
+```text
+.
+|-- 3BS-Simulator.py          # simulator and diagnostics engine
+|-- analyzer.py               # analysis and report-generation engine
+|-- assets/banner.svg         # repository visual identity
+|-- requirements.txt          # Python dependencies
+|-- CITATION.cff              # citation metadata
+|-- LICENSE                   # PolyForm Noncommercial License
+`-- NOTICE                    # attribution and redistribution notice
+```
 
 ## Roadmap
 
 - broader convergence benchmark suite
-- stronger cross-integrator validation
-- parameter-projection visualizations by dynamical family
+- stronger cross-integrator replay validation
+- physically meaningful parameter-projection figures
 - automated manuscript tables and figures
 - optional GPU acceleration paths for ensemble diagnostics
+- documented examples from small reproducible benchmark runs
 
 ## Keywords
 
-three-body-problem, chaos-theory, computational-physics, dynamical-systems, n-body, numerical-simulation, lyapunov-exponents, hamiltonian-systems
+`three-body-problem` `chaos-theory` `computational-physics` `dynamical-systems` `n-body` `numerical-simulation` `lyapunov-exponents` `hamiltonian-systems`
+
+## Citation
+
+If you use this software or analysis framework, please cite the repository metadata in `CITATION.cff`.
 
 ## License
 
@@ -147,10 +203,6 @@ This project is licensed under the PolyForm Noncommercial License 1.0.0.
 
 You may use, study and share this project only for noncommercial purposes under the terms of the LICENSE file. Commercial use requires prior written permission.
 
-Redistribution must preserve copyright notices, license terms, attribution, and the NOTICE file.
+Redistribution must preserve copyright notices, license terms, attribution, and the `NOTICE` file.
 
 Contact: Arihantbharani@outlook.com
-
-## Notes
-
-This repository is structured as a research prototype with emphasis on correctness, reproducibility, and extensibility toward larger finite-time ensemble studies.

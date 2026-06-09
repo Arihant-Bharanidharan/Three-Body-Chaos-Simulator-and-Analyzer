@@ -798,6 +798,8 @@ def extract_summary_row(bundle: RunBundle, loaded: dict[str, Any], ctx: Analysis
     row["max_step"] = config.get("max_step")
     row["output_schema_version"] = summary.get("schema_version") or claim_gate.get("schema_version")
     row["source_hash"] = nested_get(summary, [
+        ("reproducibility", "source_hashes", "3BS-Simulator.py", "sha256"),
+        ("reproducibility", "source_hashes", "3BS-Simulator.py"),
         ("reproducibility", "source_hashes", "three_body_chaos.py", "sha256"),
         ("reproducibility", "source_hashes", "three_body_chaos.py"),
         ("reproducibility", "source_hashes", "codexpy.py", "sha256"),
@@ -2521,7 +2523,7 @@ def write_evidence_traceability(
 
 def write_recommended_next_runs(gate: dict[str, Any], ensemble: dict[str, Any], hci_deep: dict[str, Any], cross_integrator: dict[str, Any], horizons: dict[str, Any], basin: dict[str, Any], ctx: AnalysisContext) -> dict[str, Any]:
     py = str(Path(sys.executable).resolve())
-    simulator = str(Path(__file__).resolve().with_name("three_body_chaos.py"))
+    simulator = str(Path(__file__).resolve().with_name("3BS-Simulator.py"))
     out = "analysis_ready_runs"
     recs: list[dict[str, Any]] = []
 
@@ -2626,7 +2628,7 @@ def write_paper_assets_v2(gate: dict[str, Any], traceability: list[dict[str, Any
     write_md(ctx.dirs["paper_assets"] / "paper_outline.md", f"# Paper Outline\n\n1. Motivation\n2. Newtonian three-body methods\n3. Composite finite-time diagnostics\n4. Evidence strength and claim gates\n5. Results\n6. Limitations\n7. Reproducibility\n\nCore conservative result: {safe_wording}")
     write_md(ctx.dirs["paper_assets"] / "paper_abstract_conservative.md", f"# Conservative Abstract\n\nThis study evaluates finite-time regime classification in Newtonian three-body simulations using Lyapunov, composite/HCI, and conservation-law diagnostics. {safe_wording}")
     write_md(ctx.dirs["paper_assets"] / "paper_introduction_skeleton.md", "# Introduction Skeleton\n\n- Three-body dynamics motivate finite-time diagnostics.\n- Largest Lyapunov estimates alone can miss numerical reliability context.\n- This work evaluates a conservative composite diagnostic framework.")
-    write_md(ctx.dirs["paper_assets"] / "paper_methods_simulator.md", "# Simulator Methods\n\nDescribe `three_body_chaos.py` runs, initial-condition modes, integrators, reliability diagnostics, and replay metadata. Do not describe analyzer-only folders as simulations.")
+    write_md(ctx.dirs["paper_assets"] / "paper_methods_simulator.md", "# Simulator Methods\n\nDescribe `3BS-Simulator.py` runs, initial-condition modes, integrators, reliability diagnostics, and replay metadata. Do not describe analyzer-only folders as simulations.")
     write_md(ctx.dirs["paper_assets"] / "paper_methods_analyzer.md", "# Analyzer Methods\n\nThe analyzer ingests existing artifacts, filters pseudo-run folders, maps claims to evidence files, and applies conservative claim gates without rerunning simulations.")
     write_md(ctx.dirs["paper_assets"] / "paper_results_evidence.md", "\n".join(["# Results Evidence", "", *[f"- {row['evidence_area']}: {row['confidence_label']} ({row['score']})" for row in strength_rows]]))
     write_md(ctx.dirs["paper_assets"] / "paper_discussion.md", "# Discussion\n\nThe safest interpretation is finite-time composite regime classification. Accuracy, asymptotic, and fractal claims require their separate gates.")

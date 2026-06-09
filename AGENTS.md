@@ -4,35 +4,35 @@
 
 Small Python research workspace for finite-time three-body chaos diagnostics.
 
-- `three_body_chaos.py`: primary maintained simulation tool with SciPy/REBOUND integration, Lyapunov analysis, GPU ensemble diagnostics, plots, and reports.
+- `3BS-Simulator.py`: primary maintained simulation tool with SciPy/REBOUND integration, Lyapunov analysis, GPU ensemble diagnostics, plots, and reports.
 - `IDK.py`: original exploratory script; keep it unchanged unless explicitly requested.
 - `research_outputs/`: generated reports, `initial_condition.json`, summaries, and plots.
 - `venv/`: Python virtual environment; do not edit or commit environment files.
 - `*_8k.png`, `*_4k.png`, `phase_space.png`: older generated visual outputs.
 
-There is no `tests/` directory or package layout. Add reusable code inside `three_body_chaos.py` unless the project grows enough to justify modules.
+There is no `tests/` directory or package layout. Add reusable code inside `3BS-Simulator.py` unless the project grows enough to justify modules.
 
 ## Build, Test, and Development Commands
 
 Run commands from `C:\Users\ariha\ivy`.
 
 ```powershell
-.\venv\Scripts\python.exe .\three_body_chaos.py --quick --no-plots --ensemble-size 0
+.\venv\Scripts\python.exe .\3BS-Simulator.py --quick --no-plots --ensemble-size 0
 ```
 Fast CPU smoke test for solver, energy diagnostics, and Lyapunov calculation.
 
 ```powershell
-.\venv\Scripts\python.exe .\three_body_chaos.py --quick --gpu --ensemble-size 512 --ensemble-steps 300
+.\venv\Scripts\python.exe .\3BS-Simulator.py --quick --gpu --ensemble-size 512 --ensemble-steps 300
 ```
 Quick GPU validation using CuPy ensemble diagnostics.
 
 ```powershell
-.\venv\Scripts\python.exe .\three_body_chaos.py --quick --advanced --ic-mode random_chaotic --seed 42 --gpu --ensemble-size 256 --ensemble-steps 120
+.\venv\Scripts\python.exe .\3BS-Simulator.py --quick --advanced --ic-mode random_chaotic --seed 42 --gpu --ensemble-size 256 --ensemble-steps 120
 ```
 Fast advanced run with QR spectrum, Poincare, FFT, recurrence, FTLE, basin, and sensitivity diagnostics.
 
 ```powershell
-.\venv\Scripts\python.exe .\three_body_chaos.py --gpu
+.\venv\Scripts\python.exe .\3BS-Simulator.py --gpu
 ```
 Full validated run that writes plots and reports under `research_outputs/`.
 
@@ -40,7 +40,7 @@ Full validated run that writes plots and reports under `research_outputs/`.
 
 Use Python 3.13, 4-space indentation, type hints for public helpers, and clear scientific names such as `lyapunov_benettin` and `compute_energy`. Prefer dataclasses for structured results.
 
-Avoid cleanup-only edits to `IDK.py`; treat `three_body_chaos.py` as maintained.
+Avoid cleanup-only edits to `IDK.py`; treat `3BS-Simulator.py` as maintained.
 
 ## Testing Guidelines
 
@@ -51,7 +51,7 @@ No formal test framework is configured yet. Use smoke runs as the quality gate. 
 - relative energy error near the current `1e-11` scale for default SciPy runs
 - angular momentum drift near the current `1e-11` scale
 
-If adding tests, create `tests/test_three_body_chaos.py` and use `pytest` with `--quick`-style durations.
+If adding tests, create `tests/test_3bs_simulator.py` and use `pytest` with `--quick`-style durations.
 
 ## Commit & Pull Request Guidelines
 
