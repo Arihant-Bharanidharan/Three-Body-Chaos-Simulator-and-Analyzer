@@ -10,7 +10,7 @@
   <img alt="Domain" src="https://img.shields.io/badge/domain-computational%20physics-7c3aed">
 </p>
 
-# Mapping Stability and Chaos in the Three-Body Problem
+# 🌌 Mapping Stability and Chaos in the Three-Body Problem
 
 **A finite-time computational diagnostics framework for heterogeneous Newtonian three-body dynamics.**
 
@@ -18,24 +18,25 @@ This repository studies stability and chaos indicators in the classical three-bo
 
 The goal is not to announce a new law of gravity or a universal stability boundary. The goal is sharper and more useful: build a reproducible research pipeline that turns raw trajectory behavior into conservative, quantitative, finite-time diagnostics.
 
-## At A Glance
+## ⚡ At A Glance
 
 | Component | What it does |
 | --- | --- |
-| `3BS-Simulator.py` | Main simulator and diagnostics engine |
+| `3BS-Simulator.py` | One-command simulator entry point |
+| `three_body_chaos_modules/` | Modular simulator implementation loaded automatically |
 | `analyzer.py` | Analyzer for existing outputs, tables, figures, and reports |
 | REBOUND IAS15 | Preferred adaptive high-accuracy integrator |
 | Full Lyapunov spectrum | Estimates all 18 finite-time exponents, not just one number |
 | HCI | Normalized diagnostic embedding, not a physical invariant |
 | Figure-eight orbit | Benchmark/control only, not the production ensemble |
 
-## Why This Exists
+## 🧭 Why This Exists
 
 The three-body problem is simple to write down and hard to understand. Three masses, Newtonian gravity, and no general closed-form solution. Tiny changes in initial conditions can produce dramatically different finite-time behavior, but numerical artifacts can also masquerade as chaos.
 
 This project is built around that distinction. It combines several independent diagnostics so that chaos-like behavior is not inferred from a single plot, a single exponent, or a single famous orbit.
 
-## Scientific Scope
+## 🔬 Scientific Scope
 
 This framework is designed for:
 
@@ -53,7 +54,7 @@ This framework does not claim:
 - new gravitational physics
 - exact regime boundaries from HCI thresholds
 
-## Dynamical Families
+## 🪐 Dynamical Families
 
 Production runs use family-based sampling instead of repeated perturbations of one canonical orbit.
 
@@ -66,7 +67,7 @@ Production runs use family-based sampling instead of repeated perturbations of o
 | `near_collision` | Close-encounter stress tests |
 | `figure8` | Benchmark/control for numerical validation only |
 
-## Diagnostic Stack
+## 🧪 Diagnostic Stack
 
 ```mermaid
 flowchart LR
@@ -83,7 +84,7 @@ flowchart LR
     H --> I
 ```
 
-## Core Features
+## 🚀 Core Features
 
 - REBOUND IAS15 support for adaptive high-accuracy integration
 - SciPy fallback and cross-validation pathways
@@ -96,7 +97,7 @@ flowchart LR
 - claim-gated paper/report generation
 - Markdown, LaTeX-ready, JSON, CSV, and figure outputs
 
-## Hamiltonian Chaos Index
+## 🧩 Hamiltonian Chaos Index
 
 The Hamiltonian Chaos Index, or HCI, is a normalized diagnostic embedding built from:
 
@@ -107,7 +108,7 @@ The Hamiltonian Chaos Index, or HCI, is a normalized diagnostic embedding built 
 
 HCI is useful for organizing runs inside an ensemble. It is not a Hamiltonian invariant, not a law of motion, and not an exact physical phase label.
 
-## Quick Start
+## 🛠️ Quick Start
 
 ### Install
 
@@ -140,7 +141,7 @@ python 3BS-Simulator.py --backend auto --ensemble-size 25000 --confirm-large-run
 python analyzer.py --input outputs --output analysis_outputs --mode quick
 ```
 
-## Outputs
+## 📦 Outputs
 
 Typical runs can produce:
 
@@ -155,7 +156,7 @@ Typical runs can produce:
 - JSON and CSV analysis artifacts
 - Markdown and LaTeX-ready paper assets
 
-## Reproducibility And Guardrails
+## 🧷 Reproducibility And Guardrails
 
 - deterministic seeds are supported
 - run configuration metadata is recorded
@@ -165,11 +166,20 @@ Typical runs can produce:
 - finite-time estimates should be read with convergence diagnostics
 - reports are claim-gated to avoid overstatement
 
-## Project Layout
+## 🗂️ Project Layout
 
 ```text
 .
 |-- 3BS-Simulator.py          # simulator and diagnostics engine
+|-- three_body_chaos_modules/ # ordered implementation modules
+|   |-- 00_prelude_config.py
+|   |-- 01_initial_conditions.py
+|   |-- 02_physics_integration.py
+|   |-- 03_lyapunov_validation.py
+|   |-- 04_ensemble.py
+|   |-- 05_diagnostics.py
+|   |-- 06_plotting_reporting.py
+|   `-- 07_cli_main.py
 |-- analyzer.py               # analysis and report-generation engine
 |-- assets/banner.svg         # repository visual identity
 |-- requirements.txt          # Python dependencies
@@ -178,7 +188,23 @@ Typical runs can produce:
 `-- NOTICE                    # attribution and redistribution notice
 ```
 
-## Roadmap
+`3BS-Simulator.py` intentionally stays as the public command. It loads the smaller implementation modules automatically, so old run habits still work while the codebase is easier to inspect and maintain.
+
+## 🧱 Modular Architecture
+
+The simulator is split by scientific role:
+
+- configuration and constants
+- initial-condition generation
+- physical equations and integration
+- Lyapunov and convergence validation
+- ensemble diagnostics
+- conservation, reversibility, and HCI summaries
+- plotting, reports, and CLI orchestration
+
+This is a source-organization change only. It does not change the equations of motion or reinterpret previous results.
+
+## 🗺️ Roadmap
 
 - broader convergence benchmark suite
 - stronger cross-integrator replay validation
@@ -187,15 +213,15 @@ Typical runs can produce:
 - optional GPU acceleration paths for ensemble diagnostics
 - documented examples from small reproducible benchmark runs
 
-## Keywords
+## 🏷️ Keywords
 
 `three-body-problem` `chaos-theory` `computational-physics` `dynamical-systems` `n-body` `numerical-simulation` `lyapunov-exponents` `hamiltonian-systems`
 
-## Citation
+## 📚 Citation
 
 If you use this software or analysis framework, please cite the repository metadata in `CITATION.cff`.
 
-## License
+## 📜 License
 
 Copyright (c) 2026 Arihant Bharanidharan. All Rights Reserved.
 

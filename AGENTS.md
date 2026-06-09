@@ -4,13 +4,14 @@
 
 Small Python research workspace for finite-time three-body chaos diagnostics.
 
-- `3BS-Simulator.py`: primary maintained simulation tool with SciPy/REBOUND integration, Lyapunov analysis, GPU ensemble diagnostics, plots, and reports.
+- `3BS-Simulator.py`: public simulator entry point. Keep this runnable as the one-command CLI.
+- `three_body_chaos_modules/`: ordered implementation modules loaded automatically by `3BS-Simulator.py`.
 - `IDK.py`: original exploratory script; keep it unchanged unless explicitly requested.
 - `research_outputs/`: generated reports, `initial_condition.json`, summaries, and plots.
 - `venv/`: Python virtual environment; do not edit or commit environment files.
 - `*_8k.png`, `*_4k.png`, `phase_space.png`: older generated visual outputs.
 
-There is no `tests/` directory or package layout. Add reusable code inside `3BS-Simulator.py` unless the project grows enough to justify modules.
+There is no `tests/` directory. Add reusable simulator code to the appropriate file under `three_body_chaos_modules/`; keep `3BS-Simulator.py` as a thin loader.
 
 ## Build, Test, and Development Commands
 

@@ -23,7 +23,7 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: Compile sources
-        run: python -m py_compile 3BS-Simulator.py analyzer.py
+        run: python -m py_compile 3BS-Simulator.py analyzer.py three_body_chaos_modules/*.py
 
       - name: Check command-line interfaces
         run: |
