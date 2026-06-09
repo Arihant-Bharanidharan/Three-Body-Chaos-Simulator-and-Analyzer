@@ -199,6 +199,13 @@ MASTER_COLUMNS = [
     "lambda_only_label",
     "hci_label",
     "composite_label",
+    "stable_fraction",
+    "metastable_fraction",
+    "chaotic_fraction",
+    "ensemble_status",
+    "largest_available_n",
+    "classification_stability_l1",
+    "ci_overlap_vs_previous_n",
     "metastable_flag",
     "chaotic_flag",
     "stable_flag",
@@ -253,6 +260,34 @@ def as_bool(value: Any) -> bool | None:
     if text in {"false", "0", "no", "fail", "failed"}:
         return False
     return None
+
+
+def quality_issues_empty(value: Any) -> bool:
+    if value is None or value == "":
+        return True
+    if isinstance(value, (list, tuple, set)):
+        return len(value) == 0
+    if isinstance(value, dict):
+        return len(value) == 0
+    text = str(value).strip()
+    return text in {"", "[]", "{}", "none", "None", "null"}
+
+
+def seed_count_from_value(value: Any) -> int:
+    if value is None or value == "":
+        return 0
+    if isinstance(value, (list, tuple, set)):
+        return len(value)
+    text = str(value).strip()
+    if not text:
+        return 0
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return len(parsed)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return len([item for item in text.replace(";", ",").split(",") if item.strip()])
 
 
 def clean(value: Any) -> str:
@@ -575,6 +610,8 @@ def normalize_regime(value: Any) -> str:
     text = str(value or "").strip().lower()
     if not text:
         return ""
+    if "metastable" in text and "chaotic" in text:
+        return "mixed_metastable_chaotic"
     if "chaotic" in text:
         return "chaotic"
     if "metastable" in text or "weak" in text or "ambiguous" in text:
@@ -720,9 +757,17 @@ def flatten_big_ensemble_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "seeds": summary.get("seeds") or largest.get("seeds"),
         "nearest_largest_classification_stability_l1": summary.get("nearest_largest_classification_stability_l1")
         or largest.get("classification_stability_l1_vs_largest_n"),
+        "classification_stability_l1": summary.get("classification_stability_l1")
+        or summary.get("nearest_largest_classification_stability_l1")
+        or largest.get("classification_stability_l1")
+        or largest.get("classification_stability_l1_vs_largest_n"),
         "largest_mean_absolute_delta_vs_previous_n": summary.get("largest_mean_absolute_delta_vs_previous_n"),
         "largest_mean_relative_delta_vs_previous_n": summary.get("largest_mean_relative_delta_vs_previous_n"),
         "largest_mean_ci_overlap_vs_previous_n": summary.get("largest_mean_ci_overlap_vs_previous_n"),
+        "ci_overlap_vs_previous_n": summary.get("ci_overlap_vs_previous_n")
+        or summary.get("largest_mean_ci_overlap_vs_previous_n")
+        or largest.get("ci_overlap_vs_previous_n")
+        or largest.get("mean_ci_overlap_vs_previous_n"),
         "mean_largest_lyapunov": summary.get("mean_largest_lyapunov") or largest.get("mean_largest_lyapunov"),
         "std_largest_lyapunov": summary.get("std_largest_lyapunov") or largest.get("std_largest_lyapunov"),
         "mean_hci": summary.get("mean_hci") or largest.get("mean_hci"),
@@ -899,8 +944,15 @@ def extract_summary_row(bundle: RunBundle, loaded: dict[str, Any], ctx: Analysis
         row["lyapunov_ci_high"] = flat_big.get("lyapunov_ci95_high")
         row["hci"] = flat_big.get("mean_hci")
         row["hci_status"] = flat_big.get("status")
-        row["regime_label"] = "mixed_metastable_chaotic"
-        row["composite_label"] = "mixed_metastable_chaotic"
+        row["stable_fraction"] = flat_big.get("stable_fraction")
+        row["metastable_fraction"] = flat_big.get("metastable_fraction")
+        row["chaotic_fraction"] = flat_big.get("chaotic_fraction")
+        row["ensemble_status"] = flat_big.get("status")
+        row["largest_available_n"] = flat_big.get("largest_available_n")
+        row["classification_stability_l1"] = flat_big.get("classification_stability_l1")
+        row["ci_overlap_vs_previous_n"] = flat_big.get("ci_overlap_vs_previous_n")
+        row["regime_label"] = normalize_regime(big_summary.get("regime_label") or "mixed_metastable_chaotic")
+        row["composite_label"] = row["regime_label"]
         row["metastable_flag"] = as_float(flat_big.get("metastable_fraction"), 0.0) > 0.0
         row["chaotic_flag"] = as_float(flat_big.get("chaotic_fraction"), 0.0) > 0.0
         row["stable_flag"] = as_float(flat_big.get("stable_fraction"), 0.0) > 0.0
@@ -919,9 +971,14 @@ def extract_summary_row(bundle: RunBundle, loaded: dict[str, Any], ctx: Analysis
     row["hci_label"] = normalize_regime(row.get("hci_label"))
     row["physical_regime"] = normalize_regime(row.get("physical_regime"))
     row["regime_label"] = normalize_regime(row.get("regime_label")) or composite or row["lambda_only_label"]
-    row["metastable_flag"] = row["regime_label"] == "metastable" or composite == "metastable"
-    row["chaotic_flag"] = row["regime_label"] == "chaotic" or composite == "chaotic"
-    row["stable_flag"] = row["regime_label"] == "stable" or composite == "stable"
+    if row["row_source_type"] == "ensemble_summary":
+        row["metastable_flag"] = as_float(row.get("metastable_fraction"), 0.0) > 0.0
+        row["chaotic_flag"] = as_float(row.get("chaotic_fraction"), 0.0) > 0.0
+        row["stable_flag"] = as_float(row.get("stable_fraction"), 0.0) > 0.0
+    else:
+        row["metastable_flag"] = row["regime_label"] in {"metastable", "mixed_metastable_chaotic"} or composite in {"metastable", "mixed_metastable_chaotic"}
+        row["chaotic_flag"] = row["regime_label"] in {"chaotic", "mixed_metastable_chaotic"} or composite in {"chaotic", "mixed_metastable_chaotic"}
+        row["stable_flag"] = row["regime_label"] == "stable" or composite == "stable"
     row["escape_flag"] = row["regime_label"] == "escaping"
     row["collision_flag"] = row["regime_label"] == "collision"
     row["bounded_flag"] = bool(row.get("bounded_flag")) or (str(row.get("basin_status")).lower() == "bounded")
@@ -1161,11 +1218,56 @@ def analyze_ensemble(rows: list[dict[str, Any]], bundles: list[RunBundle], ctx: 
     available_ns = sorted({int(as_float(row.get("N") or row.get("n") or row.get("ensemble_size"), -1)) for row in convergence_rows if as_float(row.get("N") or row.get("n") or row.get("ensemble_size"), -1) > 0})
     flat_big_summaries = [flatten_big_ensemble_summary(item) for item in big_summaries]
     largest_big = max((int(as_float(item.get("largest_available_n"), 0)) for item in flat_big_summaries), default=0)
-    strong_big = any(str(item.get("status", "")).lower() == "strong" for item in flat_big_summaries)
     best_big = max(flat_big_summaries, key=lambda item: as_float(item.get("largest_available_n"), 0), default={})
-    if strong_big or largest_big >= 1000:
+
+    classification_stability_threshold = 0.05
+    min_strong_n = 1000
+    min_strong_seed_count = 3
+    best_status = str(best_big.get("status", "")).strip().lower()
+    best_n = int(as_float(best_big.get("largest_available_n"), 0))
+    best_stability = as_float(best_big.get("classification_stability_l1"))
+    best_ci_overlap = as_bool(best_big.get("ci_overlap_vs_previous_n"))
+    best_quality_clean = quality_issues_empty(best_big.get("quality_gate_issues"))
+    best_seed_count = seed_count_from_value(best_big.get("seeds"))
+
+    reasons_passed: list[str] = []
+    reasons_failed: list[str] = []
+    if best_status == "strong":
+        reasons_passed.append("compact_summary_status_is_strong")
+    else:
+        reasons_failed.append("compact_summary_status_is_not_strong")
+    if best_n >= min_strong_n:
+        reasons_passed.append("largest_available_n_meets_threshold")
+    else:
+        reasons_failed.append("largest_available_n_below_threshold")
+    if math.isfinite(best_stability) and best_stability <= classification_stability_threshold:
+        reasons_passed.append("classification_stability_l1_within_threshold")
+    else:
+        reasons_failed.append("classification_stability_l1_missing_or_above_threshold")
+    if best_ci_overlap is True:
+        reasons_passed.append("ci_overlap_vs_previous_n_true")
+    else:
+        reasons_failed.append("ci_overlap_vs_previous_n_not_true")
+    if best_quality_clean:
+        reasons_passed.append("quality_gate_issues_empty")
+    else:
+        reasons_failed.append("quality_gate_issues_present")
+    if best_seed_count >= min_strong_seed_count:
+        reasons_passed.append("seed_count_meets_threshold")
+    else:
+        reasons_failed.append("seed_count_below_threshold")
+
+    strict_conditions_pass = (
+        best_n >= min_strong_n
+        and math.isfinite(best_stability)
+        and best_stability <= classification_stability_threshold
+        and best_ci_overlap is True
+        and best_quality_clean
+        and best_seed_count >= min_strong_seed_count
+    )
+    if best_status == "strong" or strict_conditions_pass:
         status = "strong"
-    elif len([n for n in available_ns if n in target_ns]) >= 4:
+    elif largest_big >= min_strong_n or len([n for n in available_ns if n in target_ns]) >= 4:
         status = "moderate"
     elif convergence_rows or big_summaries:
         status = "weak"
@@ -1179,7 +1281,18 @@ def analyze_ensemble(rows: list[dict[str, Any]], bundles: list[RunBundle], ctx: 
         "big_ensemble_summary_count": len(big_summaries),
         "big_ensemble_summaries": compact_rows,
         "best_big_ensemble_summary": best_big,
-        "rule": "strong requires compact big-ensemble summary >=1000 or explicit strong status; otherwise >=4 N values gives moderate.",
+        "reasons_passed": reasons_passed,
+        "reasons_failed": reasons_failed,
+        "thresholds_used": {
+            "strong_status_rule": "compact summary status == strong OR all strict evidence checks pass",
+            "min_largest_available_n": min_strong_n,
+            "classification_stability_l1_max": classification_stability_threshold,
+            "ci_overlap_vs_previous_n_required": True,
+            "quality_gate_issues_required_empty": True,
+            "min_seed_count": min_strong_seed_count,
+        },
+        "strict_conditions_pass": strict_conditions_pass,
+        "rule": "strong requires compact summary status strong or all strict checks; N alone gives at most moderate.",
     }
     write_csv(ctx.dirs["data"] / "ensemble_convergence_clean.csv", convergence_rows)
     write_csv(ctx.dirs["data"] / "ensemble_regime_fraction_table.csv", convergence_rows)
@@ -1194,6 +1307,8 @@ def analyze_ensemble(rows: list[dict[str, Any]], bundles: list[RunBundle], ctx: 
                 f"- Largest available N: {summary['largest_available_n']}",
                 f"- Explicit N values found: {available_ns or 'none'}",
                 f"- Big ensemble summaries: {len(big_summaries)}",
+                f"- Reasons passed: {', '.join(reasons_passed) if reasons_passed else 'none'}",
+                f"- Reasons failed: {', '.join(reasons_failed) if reasons_failed else 'none'}",
                 f"- Best compact big ensemble source: `{best_big.get('source_file', 'none')}`",
                 f"- Classification stability L1: `{best_big.get('nearest_largest_classification_stability_l1', '')}`",
                 f"- CI overlap vs previous N: `{best_big.get('largest_mean_ci_overlap_vs_previous_n', '')}`",
@@ -1334,14 +1449,24 @@ def confusion_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def analyze_metastable(rows: list[dict[str, Any]], ctx: AnalysisContext) -> dict[str, Any]:
-    metastable = [row for row in rows if as_bool(row.get("metastable_flag")) is True or normalize_regime(row.get("regime_label")) == "metastable"]
+    metastable = [
+        row
+        for row in rows
+        if as_bool(row.get("metastable_flag")) is True
+        or as_float(row.get("metastable_fraction"), 0.0) > 0.0
+        or normalize_regime(row.get("regime_label")) in {"metastable", "mixed_metastable_chaotic"}
+    ]
     by_ic = Counter(str(row.get("ic_mode") or "unknown") for row in metastable)
     reliable = [row for row in metastable if as_bool(row.get("reliability_pass")) is True]
+    compact_metastable_fraction = max((as_float(row.get("metastable_fraction"), 0.0) for row in rows), default=0.0)
+    compact_chaotic_fraction = max((as_float(row.get("chaotic_fraction"), 0.0) for row in rows), default=0.0)
     summary = {
         "metastable_count": len(metastable),
         "metastable_reliability_pass_fraction": len(reliable) / len(metastable) if metastable else 0.0,
         "metastable_by_ic_mode": dict(by_ic),
-        "status": "present" if metastable else "insufficient_data",
+        "compact_metastable_fraction_max": compact_metastable_fraction,
+        "compact_chaotic_fraction_max": compact_chaotic_fraction,
+        "status": "present" if metastable or compact_metastable_fraction > 0.0 else "insufficient_data",
     }
     write_csv(ctx.dirs["data"] / "metastable_cases.csv", metastable, MASTER_COLUMNS)
     ambiguous = [row for row in rows if "ambiguous" in str(row.get("regime_label")).lower() or normalize_regime(row.get("composite_label")) == "metastable"]
@@ -1353,6 +1478,8 @@ def analyze_metastable(rows: list[dict[str, Any]], ctx: AnalysisContext) -> dict
                 "# Metastable Evidence",
                 "",
                 f"- Metastable rows: {len(metastable)}",
+                f"- Maximum compact metastable fraction: {compact_metastable_fraction:.6g}",
+                f"- Maximum compact chaotic fraction: {compact_chaotic_fraction:.6g}",
                 f"- Reliability pass fraction among metastable rows: {summary['metastable_reliability_pass_fraction']:.3f}",
                 "- Metastable by IC mode:",
                 *(f"  - {key}: {value}" for key, value in by_ic.items()),
@@ -2422,7 +2549,7 @@ def write_evidence_traceability(
             "support_status": ensemble.get("status", "insufficient_data"),
             "evidence_files": str(ctx.dirs["json"] / "ensemble_convergence_status.json") + ";" + str(ensemble.get("best_big_ensemble_summary", {}).get("source_file", "")),
             "evidence_metrics": f"largest_available_n={ensemble.get('largest_available_n', 0)}; status={ensemble.get('status')}",
-            "threshold_used": "strong if compact summary status strong or N>=1000",
+            "threshold_used": "strong only if compact summary status is strong or all strict checks pass: N>=1000, L1<=0.05, CI overlap true, no quality issues, seed_count>=3",
             "reason": "compact ensemble summaries are ingested as ensemble-summary evidence",
             "limitations": "does not by itself prove HCI superiority",
             "paper_wording": "ensemble convergence evidence was strong/moderate as reported",
