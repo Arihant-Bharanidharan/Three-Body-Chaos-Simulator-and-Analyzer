@@ -27,6 +27,7 @@ import sqlite3
 import statistics
 import sys
 import time
+import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -381,11 +382,21 @@ def write_csv(path: Path, rows: list[dict[str, Any]], columns: list[str] | None 
             writer.writerow({column: clean(row.get(column)) for column in columns})
 
 
+def json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return value
+
+
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(data, dict):
         data = {**LICENSE_METADATA, **data}
-    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(json_safe(data), indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
 
 
 def write_md(path: Path, text: str) -> None:
@@ -1718,48 +1729,779 @@ def analyze_parameter_sensitivity(bundles: list[RunBundle], ctx: AnalysisContext
     return {"parameter_sensitivity_rows": len(rows)}
 
 
-def run_optional_ml(rows: list[dict[str, Any]], ctx: AnalysisContext) -> dict[str, Any]:
-    if not ctx.args.enable_ml and ctx.args.mode != "ml":
-        write_md(ctx.dirs["markdown"] / "ml_cluster_analysis.md", "# ML Cluster Analysis\n\nML was not enabled.")
-        write_csv(ctx.dirs["data"] / "ml_feature_importance.csv", [])
-        write_csv(ctx.dirs["data"] / "ml_anomaly_cases.csv", [])
-        return {"status": "not_enabled"}
+ML_RANDOM_SEED = 20260609
+ML_SILHOUETTE_TRUST_THRESHOLD = 0.40
+ML_BOOTSTRAP_ARI_TRUST_THRESHOLD = 0.70
+ML_MIN_ROWS = 6
+
+
+def ml_feature_specs() -> list[dict[str, Any]]:
+    return [
+        {"name": "largest_lyapunov", "transform": "identity"},
+        {"name": "hci", "transform": "identity"},
+        {"name": "energy_drift_rel", "transform": "log_abs"},
+        {"name": "energy_drift_abs", "transform": "log_abs"},
+        {"name": "angular_momentum_drift_rel", "transform": "log_abs"},
+        {"name": "angular_momentum_drift_abs", "transform": "log_abs"},
+        {"name": "reversibility_error", "transform": "log_abs"},
+        {"name": "spectrum_sum", "transform": "abs_log"},
+        {"name": "spectrum_pairing_residual", "transform": "log_abs"},
+        {"name": "qr_orthogonality_error", "transform": "log_abs"},
+        {"name": "renorm_count", "transform": "identity"},
+        {"name": "closest_encounter", "transform": "neg_log_positive"},
+        {"name": "com_drift", "transform": "log_abs"},
+        {"name": "momentum_drift", "transform": "log_abs"},
+        {"name": "megno", "transform": "identity"},
+        {"name": "sali", "transform": "neg_log_positive"},
+        {"name": "fli", "transform": "identity"},
+        {"name": "recurrence_rate", "transform": "identity"},
+        {"name": "determinism", "transform": "identity"},
+        {"name": "laminarity", "transform": "identity"},
+        {"name": "spectral_entropy", "transform": "identity"},
+        {"name": "ftle_mean", "transform": "identity"},
+        {"name": "ftle_max", "transform": "identity"},
+        {"name": "basin_boundary_fraction", "transform": "identity"},
+        {"name": "basin_fractal_dimension", "transform": "identity"},
+        {"name": "stable_fraction", "transform": "identity"},
+        {"name": "metastable_fraction", "transform": "identity"},
+        {"name": "chaotic_fraction", "transform": "identity"},
+        {"name": "largest_available_n", "transform": "log_positive"},
+        {"name": "classification_stability_l1", "transform": "identity"},
+        {"name": "ci_overlap_vs_previous_n", "transform": "bool"},
+        {"name": "reliability_pass", "transform": "bool"},
+    ]
+
+
+def ml_transform_value(value: Any, transform: str) -> float:
+    if transform == "bool":
+        bool_value = as_bool(value)
+        return 1.0 if bool_value is True else 0.0 if bool_value is False else float("nan")
+    numeric = as_float(value)
+    if not math.isfinite(numeric):
+        return float("nan")
+    if transform == "identity":
+        return numeric
+    if transform == "log_abs":
+        return math.log10(abs(numeric) + 1e-300)
+    if transform == "abs_log":
+        return math.log10(abs(numeric) + 1e-300)
+    if transform == "log_positive":
+        return math.log10(max(numeric, 0.0) + 1.0)
+    if transform == "neg_log_positive":
+        return -math.log10(max(numeric, 0.0) + 1e-300)
+    return numeric
+
+
+def build_ml_feature_matrix(rows: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]], list[list[float]], list[dict[str, Any]]]:
+    specs = ml_feature_specs()
+    features = [spec["name"] for spec in specs]
+    matrix: list[list[float]] = []
+    used_rows: list[dict[str, Any]] = []
+    coverage = {feature: {"present": 0, "missing": 0} for feature in features}
+    for row in rows:
+        values = [ml_transform_value(row.get(spec["name"]), str(spec["transform"])) for spec in specs]
+        if any(math.isfinite(value) for value in values):
+            for feature, value in zip(features, values):
+                if math.isfinite(value):
+                    coverage[feature]["present"] += 1
+                else:
+                    coverage[feature]["missing"] += 1
+            matrix.append(values)
+            used_rows.append(row)
+    coverage_rows = [
+        {
+            "feature": feature,
+            "present": counts["present"],
+            "missing": counts["missing"],
+            "coverage_fraction": counts["present"] / len(used_rows) if used_rows else 0.0,
+        }
+        for feature, counts in coverage.items()
+    ]
+    return features, used_rows, matrix, coverage_rows
+
+
+def labels_have_clusters(labels: Any) -> bool:
+    return len({int(label) for label in labels if int(label) >= 0}) >= 2
+
+
+def cluster_count(labels: Any) -> int:
+    return len({int(label) for label in labels if int(label) >= 0})
+
+
+def safe_silhouette(x_scaled: Any, labels: Any) -> float:
+    try:
+        from sklearn.metrics import silhouette_score  # type: ignore
+
+        if not labels_have_clusters(labels):
+            return float("nan")
+        usable = [index for index, label in enumerate(labels) if int(label) >= 0]
+        if len(usable) < 3:
+            return float("nan")
+        unique = {int(labels[index]) for index in usable}
+        if len(unique) < 2 or len(unique) >= len(usable):
+            return float("nan")
+        return float(silhouette_score(x_scaled[usable], [int(labels[index]) for index in usable]))
+    except Exception:
+        try:
+            return numpy_silhouette_score(x_scaled, labels)
+        except Exception:
+            return float("nan")
+
+
+def safe_dbcv(x_scaled: Any, labels: Any) -> float:
+    try:
+        from hdbscan.validity import validity_index  # type: ignore
+
+        if not labels_have_clusters(labels):
+            return float("nan")
+        return float(validity_index(x_scaled, labels))
+    except Exception:
+        return float("nan")
+
+
+def robust_scale_numpy(raw: Any) -> Any:
+    import numpy as np  # type: ignore
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        medians = np.nanmedian(raw, axis=0)
+    medians = np.where(np.isfinite(medians), medians, 0.0)
+    imputed = np.where(np.isfinite(raw), raw, medians)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        q1 = np.nanpercentile(imputed, 25, axis=0)
+        q3 = np.nanpercentile(imputed, 75, axis=0)
+    scale = q3 - q1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        fallback_scale = np.nanstd(imputed, axis=0)
+    scale = np.where(np.isfinite(scale) & (scale > 1e-12), scale, fallback_scale)
+    scale = np.where(np.isfinite(scale) & (scale > 1e-12), scale, 1.0)
+    scaled = (imputed - medians) / scale
+    return np.nan_to_num(scaled, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def comb2(value: float) -> float:
+    return value * (value - 1.0) / 2.0
+
+
+def adjusted_rand_index_numpy(labels_true: Any, labels_pred: Any) -> float:
+    import numpy as np  # type: ignore
+
+    true = np.asarray(labels_true)
+    pred = np.asarray(labels_pred)
+    if true.size != pred.size or true.size < 2:
+        return float("nan")
+    true_values = list(dict.fromkeys([str(value) for value in true.tolist()]))
+    pred_values = list(dict.fromkeys([str(value) for value in pred.tolist()]))
+    contingency = np.zeros((len(true_values), len(pred_values)), dtype=float)
+    true_index = {value: index for index, value in enumerate(true_values)}
+    pred_index = {value: index for index, value in enumerate(pred_values)}
+    for a, b in zip(true.tolist(), pred.tolist()):
+        contingency[true_index[str(a)], pred_index[str(b)]] += 1.0
+    sum_comb = float(np.sum(contingency * (contingency - 1.0) / 2.0))
+    row_comb = float(np.sum(np.sum(contingency, axis=1) * (np.sum(contingency, axis=1) - 1.0) / 2.0))
+    col_comb = float(np.sum(np.sum(contingency, axis=0) * (np.sum(contingency, axis=0) - 1.0) / 2.0))
+    total_comb = comb2(float(true.size))
+    if total_comb <= 0.0:
+        return float("nan")
+    expected = row_comb * col_comb / total_comb
+    maximum = 0.5 * (row_comb + col_comb)
+    denominator = maximum - expected
+    if abs(denominator) < 1e-15:
+        return 1.0 if sum_comb == maximum else 0.0
+    return float((sum_comb - expected) / denominator)
+
+
+def numpy_silhouette_score(x_scaled: Any, labels: Any, max_points: int = 800) -> float:
+    import numpy as np  # type: ignore
+
+    labels_array = np.asarray(labels, dtype=int)
+    usable = np.asarray([index for index, label in enumerate(labels_array) if int(label) >= 0], dtype=int)
+    if usable.size < 3:
+        return float("nan")
+    unique = sorted({int(labels_array[index]) for index in usable})
+    if len(unique) < 2 or len(unique) >= usable.size:
+        return float("nan")
+    if usable.size > max_points:
+        rng = np.random.default_rng(ML_RANDOM_SEED)
+        usable = np.sort(rng.choice(usable, size=max_points, replace=False))
+    x = np.asarray(x_scaled, dtype=float)[usable]
+    y = labels_array[usable]
+    diffs = x[:, None, :] - x[None, :, :]
+    distances = np.sqrt(np.sum(diffs * diffs, axis=2))
+    scores: list[float] = []
+    for index, label in enumerate(y):
+        same = y == label
+        if np.sum(same) <= 1:
+            continue
+        a = float(np.mean(distances[index, same][distances[index, same] > 0.0]))
+        b_values = [float(np.mean(distances[index, y == other])) for other in unique if other != int(label) and np.any(y == other)]
+        if not b_values:
+            continue
+        b = min(b_values)
+        denom = max(a, b)
+        if denom > 0.0:
+            scores.append((b - a) / denom)
+    return float(np.mean(scores)) if scores else float("nan")
+
+
+def numpy_kmeans_fit_predict(x_scaled: Any, n_clusters: int, random_seed: int, max_iter: int = 120) -> Any:
+    import numpy as np  # type: ignore
+
+    x = np.asarray(x_scaled, dtype=float)
+    n_rows = int(x.shape[0])
+    k = max(1, min(int(n_clusters), n_rows))
+    rng = np.random.default_rng(random_seed)
+    indices = rng.choice(n_rows, size=k, replace=False) if n_rows >= k else np.arange(n_rows)
+    centers = x[indices].copy()
+    labels = np.zeros(n_rows, dtype=int)
+    for _ in range(max_iter):
+        distances = np.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        new_labels = np.argmin(distances, axis=1)
+        new_centers = centers.copy()
+        for cluster in range(k):
+            members = x[new_labels == cluster]
+            if members.size:
+                new_centers[cluster] = np.mean(members, axis=0)
+            else:
+                new_centers[cluster] = x[int(rng.integers(0, n_rows))]
+        if np.array_equal(new_labels, labels) and np.allclose(new_centers, centers):
+            labels = new_labels
+            break
+        labels = new_labels
+        centers = new_centers
+    return labels
+
+
+def numpy_pca_embedding(x_scaled: Any) -> tuple[Any, dict[str, Any]]:
+    import numpy as np  # type: ignore
+
+    x = np.asarray(x_scaled, dtype=float)
+    x_centered = x - np.mean(x, axis=0)
+    _, singular_values, vt = np.linalg.svd(x_centered, full_matrices=False)
+    components = vt[:2].T
+    embedding = x_centered @ components
+    if embedding.shape[1] < 2:
+        embedding = np.column_stack([embedding[:, 0], np.zeros(embedding.shape[0])])
+    variance = singular_values**2
+    total = float(np.sum(variance))
+    explained = [float(value / total) for value in variance[:2]] if total > 0.0 else [float("nan"), float("nan")]
+    return embedding[:, :2], {"sklearn_pca_unavailable": True, "explained_variance_ratio": explained}
+
+
+def density_anomaly_scores_numpy(x_scaled: Any, max_reference: int = 1500) -> tuple[Any, Any]:
+    import numpy as np  # type: ignore
+
+    x = np.asarray(x_scaled, dtype=float)
+    n_rows = int(x.shape[0])
+    center = np.median(x, axis=0)
+    robust_distance = np.sqrt(np.sum((x - center) ** 2, axis=1))
+    if n_rows < 3:
+        return robust_distance, robust_distance
+    try:
+        from scipy.spatial import cKDTree  # type: ignore
+
+        neighbors = max(2, min(20, n_rows - 1))
+        distances, _ = cKDTree(x).query(x, k=neighbors + 1)
+        local_score = np.mean(distances[:, 1:], axis=1)
+    except Exception:
+        rng = np.random.default_rng(ML_RANDOM_SEED)
+        if n_rows > max_reference:
+            ref_indices = rng.choice(n_rows, size=max_reference, replace=False)
+            reference = x[ref_indices]
+        else:
+            reference = x
+        distances = np.sqrt(np.sum((x[:, None, :] - reference[None, :, :]) ** 2, axis=2))
+        nearest = np.partition(distances, kth=min(5, distances.shape[1] - 1), axis=1)[:, 1 : min(6, distances.shape[1])]
+        local_score = np.mean(nearest, axis=1)
+    return robust_distance, local_score
+
+
+def choose_monster_cluster_model(x_scaled: Any, random_seed: int) -> tuple[str, Any, Any, dict[str, Any]]:
+    import numpy as np  # type: ignore
+
+    n_rows = int(x_scaled.shape[0])
+    diagnostics: dict[str, Any] = {"candidates": []}
+    try:
+        import hdbscan  # type: ignore
+
+        min_cluster_size = max(3, min(15, int(math.sqrt(n_rows))))
+        min_samples = max(2, min(10, min_cluster_size // 2))
+        model = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples, prediction_data=False)
+        labels = model.fit_predict(x_scaled)
+        diagnostics["candidates"].append({"algorithm": "HDBSCAN", "clusters": cluster_count(labels), "noise_fraction": float(np.mean(labels < 0)), "min_cluster_size": min_cluster_size})
+        if labels_have_clusters(labels):
+            return "HDBSCAN", model, labels, diagnostics
+    except Exception as exc:
+        diagnostics["hdbscan_unavailable_or_failed"] = str(exc)
+
+    try:
+        from sklearn.cluster import OPTICS  # type: ignore
+
+        min_samples = max(3, min(20, int(math.sqrt(n_rows))))
+        model = OPTICS(min_samples=min_samples, xi=0.05, min_cluster_size=max(0.05, min(0.25, 5.0 / max(n_rows, 1))))
+        labels = model.fit_predict(x_scaled)
+        diagnostics["candidates"].append({"algorithm": "OPTICS", "clusters": cluster_count(labels), "noise_fraction": float(np.mean(labels < 0)), "min_samples": min_samples})
+        if labels_have_clusters(labels):
+            return "OPTICS", model, labels, diagnostics
+    except Exception as exc:
+        diagnostics["optics_failed"] = str(exc)
+
+    best_labels = None
+    best_model = None
+    best_score = -float("inf")
+    max_k = max(2, min(8, n_rows - 1))
+    try:
+        from sklearn.cluster import KMeans  # type: ignore
+
+        for k in range(2, max_k + 1):
+            model = KMeans(n_clusters=k, random_state=random_seed, n_init=25)
+            labels = model.fit_predict(x_scaled)
+            score = safe_silhouette(x_scaled, labels)
+            diagnostics["candidates"].append({"algorithm": "KMeans", "k": k, "silhouette": score})
+            if math.isfinite(score) and score > best_score:
+                best_score = score
+                best_model = model
+                best_labels = labels
+        if best_labels is None:
+            best_model = KMeans(n_clusters=min(2, n_rows), random_state=random_seed, n_init=25)
+            best_labels = best_model.fit_predict(x_scaled)
+        return "KMeans", best_model, best_labels, diagnostics
+    except Exception as exc:
+        diagnostics["sklearn_kmeans_failed"] = str(exc)
+        for k in range(2, max_k + 1):
+            labels = numpy_kmeans_fit_predict(x_scaled, k, random_seed + k)
+            score = safe_silhouette(x_scaled, labels)
+            diagnostics["candidates"].append({"algorithm": "NumPyKMeans", "k": k, "silhouette": score})
+            if math.isfinite(score) and score > best_score:
+                best_score = score
+                best_model = {"algorithm": "NumPyKMeans", "k": k}
+                best_labels = labels
+    if best_labels is None:
+        best_model = {"algorithm": "NumPyKMeans", "k": min(2, n_rows)}
+        best_labels = numpy_kmeans_fit_predict(x_scaled, min(2, n_rows), random_seed)
+    return "NumPyKMeans", best_model, best_labels, diagnostics
+
+
+def bootstrap_cluster_stability(x_scaled: Any, base_labels: Any, algorithm: str, random_seed: int, draws: int = 40) -> dict[str, Any]:
+    import numpy as np  # type: ignore
+    try:
+        from sklearn.cluster import KMeans, OPTICS  # type: ignore
+    except Exception:
+        KMeans = None  # type: ignore
+        OPTICS = None  # type: ignore
+    try:
+        from sklearn.metrics import adjusted_rand_score  # type: ignore
+    except Exception:
+        adjusted_rand_score = adjusted_rand_index_numpy  # type: ignore
+
+    if x_scaled.shape[0] < 8 or not labels_have_clusters(base_labels):
+        return {"draws": 0, "mean_adjusted_rand": float("nan"), "median_adjusted_rand": float("nan"), "status": "insufficient_data"}
+    rng = np.random.default_rng(random_seed)
+    scores: list[float] = []
+    n_rows = int(x_scaled.shape[0])
+    sample_size = max(4, int(0.8 * n_rows))
+    base_cluster_count = max(2, cluster_count(base_labels))
+    for draw in range(draws):
+        indices = np.sort(rng.choice(n_rows, size=sample_size, replace=False))
+        if len({int(base_labels[index]) for index in indices if int(base_labels[index]) >= 0}) < 2:
+            continue
+        try:
+            if algorithm == "KMeans" and KMeans is not None:
+                model = KMeans(n_clusters=min(base_cluster_count, len(indices) - 1), random_state=random_seed + draw + 1, n_init=20)
+                boot_labels = model.fit_predict(x_scaled[indices])
+            elif algorithm == "OPTICS" and OPTICS is not None:
+                model = OPTICS(min_samples=max(3, min(20, int(math.sqrt(len(indices))))))
+                boot_labels = model.fit_predict(x_scaled[indices])
+            else:
+                try:
+                    import hdbscan  # type: ignore
+
+                    model = hdbscan.HDBSCAN(min_cluster_size=max(3, min(15, int(math.sqrt(len(indices))))))
+                    boot_labels = model.fit_predict(x_scaled[indices])
+                except Exception:
+                    if KMeans is not None:
+                        model = KMeans(n_clusters=min(base_cluster_count, len(indices) - 1), random_state=random_seed + draw + 1, n_init=20)
+                        boot_labels = model.fit_predict(x_scaled[indices])
+                    else:
+                        boot_labels = numpy_kmeans_fit_predict(x_scaled[indices], min(base_cluster_count, len(indices) - 1), random_seed + draw + 1)
+            if labels_have_clusters(boot_labels):
+                scores.append(float(adjusted_rand_score([int(base_labels[index]) for index in indices], boot_labels)))
+        except Exception:
+            continue
+    mean_score = float(np.mean(scores)) if scores else float("nan")
+    median_score = float(np.median(scores)) if scores else float("nan")
+    status = "stable" if math.isfinite(mean_score) and mean_score >= ML_BOOTSTRAP_ARI_TRUST_THRESHOLD else "unstable_or_insufficient"
+    return {"draws": len(scores), "mean_adjusted_rand": mean_score, "median_adjusted_rand": median_score, "status": status}
+
+
+def lambda_label_ari(labels: Any, used_rows: list[dict[str, Any]]) -> float:
+    target = [normalize_regime(row.get("lambda_only_label") or classify_lambda(as_float(row.get("largest_lyapunov")))) for row in used_rows]
+    if len(set(target)) < 2 or not labels_have_clusters(labels):
+        return float("nan")
+    try:
+        from sklearn.metrics import adjusted_rand_score  # type: ignore
+
+        return float(adjusted_rand_score(target, [int(label) for label in labels]))
+    except Exception:
+        return adjusted_rand_index_numpy(target, [int(label) for label in labels])
+
+
+def run_anomaly_detectors(x_scaled: Any, used_rows: list[dict[str, Any]], random_seed: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    import numpy as np  # type: ignore
+
+    n_rows = int(x_scaled.shape[0])
+    contamination = min(0.2, max(0.02, 3.0 / max(n_rows, 1)))
+    detectors_used: list[str] = []
+    fallback_notes: list[str] = []
+    try:
+        from sklearn.ensemble import IsolationForest  # type: ignore
+
+        iso = IsolationForest(n_estimators=300, contamination=contamination, random_state=random_seed)
+        iso_pred = iso.fit_predict(x_scaled)
+        iso_score = -iso.score_samples(x_scaled)
+        detectors_used.append("IsolationForest")
+    except Exception as exc:
+        iso_score, _ = density_anomaly_scores_numpy(x_scaled)
+        threshold = float(np.quantile(iso_score, 1.0 - contamination))
+        iso_pred = np.where(iso_score >= threshold, -1, 1)
+        detectors_used.append("robust_distance_fallback")
+        fallback_notes.append(f"IsolationForest unavailable: {exc}")
+    try:
+        from sklearn.neighbors import LocalOutlierFactor  # type: ignore
+
+        if n_rows >= 5:
+            lof_neighbors = max(2, min(35, n_rows - 1))
+            lof = LocalOutlierFactor(n_neighbors=lof_neighbors, contamination=contamination)
+            lof_pred = lof.fit_predict(x_scaled)
+            lof_score = -lof.negative_outlier_factor_
+            detectors_used.append("LocalOutlierFactor")
+        else:
+            lof_pred = np.ones(n_rows, dtype=int)
+            lof_score = np.zeros(n_rows, dtype=float)
+            lof_neighbors = 0
+    except Exception as exc:
+        _, lof_score = density_anomaly_scores_numpy(x_scaled)
+        threshold = float(np.quantile(lof_score, 1.0 - contamination))
+        lof_pred = np.where(lof_score >= threshold, -1, 1)
+        lof_neighbors = 0
+        detectors_used.append("local_density_fallback")
+        fallback_notes.append(f"LocalOutlierFactor unavailable: {exc}")
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(used_rows):
+        iso_flag = int(iso_pred[index]) == -1
+        lof_flag = int(lof_pred[index]) == -1
+        reliability = as_bool(row.get("reliability_pass"))
+        anomaly_votes = int(iso_flag) + int(lof_flag)
+        if anomaly_votes or reliability is False:
+            rows.append(
+                {
+                    "run_id": row.get("run_id"),
+                    "ic_mode": row.get("ic_mode"),
+                    "regime_label": row.get("regime_label"),
+                    "lambda_only_label": row.get("lambda_only_label"),
+                    "reliability_pass": row.get("reliability_pass"),
+                    "isolation_forest_flag": iso_flag,
+                    "local_outlier_factor_flag": lof_flag,
+                    "anomaly_votes": anomaly_votes,
+                    "isolation_score": float(iso_score[index]),
+                    "lof_score": float(lof_score[index]),
+                    "claim_gate_note": "candidate numerical weirdo; inspect reliability diagnostics before using this run as evidence",
+                }
+            )
+    summary = {
+        "contamination": contamination,
+        "isolation_forest_flags": int(np.sum(iso_pred == -1)),
+        "lof_flags": int(np.sum(lof_pred == -1)),
+        "lof_neighbors": lof_neighbors,
+        "detectors_used": detectors_used,
+        "fallback_notes": fallback_notes,
+    }
+    return rows, summary
+
+
+def compute_ml_feature_importance(features: list[str], x_scaled: Any, labels: Any, anomaly_rows: list[dict[str, Any]], used_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    import numpy as np  # type: ignore
+
+    labels_array = np.asarray(labels)
+    importance_rows: list[dict[str, Any]] = []
+    anomaly_ids = {str(row.get("run_id")) for row in anomaly_rows if row.get("anomaly_votes", 0)}
+    anomaly_mask = np.asarray([str(row.get("run_id")) in anomaly_ids for row in used_rows], dtype=bool)
+    for col_index, feature in enumerate(features):
+        values = x_scaled[:, col_index]
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size == 0:
+            importance_rows.append({"feature": feature, "cluster_separation_importance": "", "anomaly_shift_importance": "", "combined_importance": ""})
+            continue
+        cluster_means: list[float] = []
+        for label in sorted({int(label) for label in labels_array if int(label) >= 0}):
+            label_values = values[labels_array == label]
+            if label_values.size:
+                cluster_means.append(float(np.mean(label_values)))
+        cluster_importance = float(np.std(cluster_means)) if len(cluster_means) >= 2 else 0.0
+        anomaly_importance = 0.0
+        if np.any(anomaly_mask) and np.any(~anomaly_mask):
+            anomaly_importance = abs(float(np.mean(values[anomaly_mask]) - np.mean(values[~anomaly_mask])))
+        importance_rows.append(
+            {
+                "feature": feature,
+                "cluster_separation_importance": cluster_importance,
+                "anomaly_shift_importance": anomaly_importance,
+                "combined_importance": cluster_importance + anomaly_importance,
+            }
+        )
+    return sorted(importance_rows, key=lambda row: as_float(row.get("combined_importance"), 0.0), reverse=True)
+
+
+def build_ml_embedding(x_scaled: Any, random_seed: int) -> tuple[str, Any, dict[str, Any]]:
+    try:
+        import umap  # type: ignore
+
+        n_neighbors = max(2, min(15, x_scaled.shape[0] - 1))
+        reducer = umap.UMAP(n_components=2, n_neighbors=n_neighbors, min_dist=0.1, random_state=random_seed)
+        return "UMAP", reducer.fit_transform(x_scaled), {"n_neighbors": n_neighbors}
+    except Exception as exc:
+        try:
+            from sklearn.decomposition import PCA  # type: ignore
+
+            reducer = PCA(n_components=2, random_state=random_seed)
+            return "PCA", reducer.fit_transform(x_scaled), {"umap_unavailable_or_failed": str(exc), "explained_variance_ratio": [float(value) for value in reducer.explained_variance_ratio_]}
+        except Exception as pca_exc:
+            embedding, diagnostics = numpy_pca_embedding(x_scaled)
+            diagnostics["umap_unavailable_or_failed"] = str(exc)
+            diagnostics["sklearn_pca_unavailable_or_failed"] = str(pca_exc)
+            return "NumPyPCA", embedding, diagnostics
+
+
+def plot_ml_clusters(embedding: Any, labels: Any, anomaly_rows: list[dict[str, Any]], used_rows: list[dict[str, Any]], embedding_name: str, ctx: AnalysisContext) -> None:
+    if ctx.args.no_plots:
+        return
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        import numpy as np  # type: ignore
+
+        anomaly_ids = {str(row.get("run_id")) for row in anomaly_rows}
+        anomaly_mask = np.asarray([str(row.get("run_id")) in anomaly_ids for row in used_rows], dtype=bool)
+        fig, ax = plt.subplots(figsize=(7, 5), dpi=180)
+        scatter = ax.scatter(embedding[:, 0], embedding[:, 1], c=labels, cmap="tab10", s=38, alpha=0.85, edgecolor="none")
+        if np.any(anomaly_mask):
+            ax.scatter(embedding[anomaly_mask, 0], embedding[anomaly_mask, 1], facecolors="none", edgecolors="black", s=90, linewidths=1.3, label="anomaly/reliability flag")
+            ax.legend(loc="best", fontsize=8)
+        ax.set_xlabel(f"{embedding_name} 1")
+        ax.set_ylabel(f"{embedding_name} 2")
+        ax.set_title("Exploratory ML Regime Clustering")
+        fig.colorbar(scatter, ax=ax, label="cluster label")
+        fig.tight_layout()
+        fig.savefig(ctx.dirs["figures"] / "ml_cluster_embedding.png")
+        plt.close(fig)
+    except Exception as exc:
+        ctx.optional_failures.append({"module": "ml_cluster_plot", "reason": str(exc)})
+
+
+def plot_ml_anomaly_heatmap(features: list[str], x_scaled: Any, anomaly_rows: list[dict[str, Any]], used_rows: list[dict[str, Any]], ctx: AnalysisContext) -> None:
+    if ctx.args.no_plots or not anomaly_rows:
+        return
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        import numpy as np  # type: ignore
+
+        anomaly_ids = {str(row.get("run_id")) for row in anomaly_rows}
+        indices = [index for index, row in enumerate(used_rows) if str(row.get("run_id")) in anomaly_ids][:30]
+        if not indices:
+            return
+        fig, ax = plt.subplots(figsize=(max(8, len(features) * 0.28), max(4, len(indices) * 0.22)), dpi=180)
+        image = ax.imshow(x_scaled[indices], aspect="auto", cmap="coolwarm")
+        ax.set_yticks(range(len(indices)))
+        ax.set_yticklabels([str(used_rows[index].get("run_id"))[:18] for index in indices], fontsize=6)
+        ax.set_xticks(range(len(features)))
+        ax.set_xticklabels(features, rotation=80, ha="right", fontsize=6)
+        ax.set_title("ML Anomaly Feature Heatmap")
+        fig.colorbar(image, ax=ax, label="robust-scaled feature value")
+        fig.tight_layout()
+        fig.savefig(ctx.dirs["figures"] / "ml_anomaly_heatmap.png")
+        plt.close(fig)
+    except Exception as exc:
+        ctx.optional_failures.append({"module": "ml_anomaly_heatmap", "reason": str(exc)})
+
+
+def plot_ml_feature_importance(importance_rows: list[dict[str, Any]], ctx: AnalysisContext) -> None:
+    if ctx.args.no_plots or not importance_rows:
+        return
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+
+        top = importance_rows[:15]
+        labels = [str(row["feature"]) for row in reversed(top)]
+        values = [as_float(row.get("combined_importance"), 0.0) for row in reversed(top)]
+        fig, ax = plt.subplots(figsize=(8, 5), dpi=180)
+        ax.barh(labels, values, color="#7c3aed")
+        ax.set_xlabel("relative exploratory importance")
+        ax.set_title("ML Feature Importance")
+        fig.tight_layout()
+        fig.savefig(ctx.dirs["figures"] / "ml_feature_importance.png")
+        plt.close(fig)
+    except Exception as exc:
+        ctx.optional_failures.append({"module": "ml_feature_importance_plot", "reason": str(exc)})
+
+
+def ml_anomaly_report(anomaly_rows: list[dict[str, Any]], summary: dict[str, Any], ctx: AnalysisContext) -> None:
+    write_csv(ctx.dirs["data"] / "ml_anomaly_cases.csv", anomaly_rows)
+    write_json(ctx.dirs["json"] / "ml_anomaly_summary.json", summary)
+    write_md(
+        ctx.dirs["markdown"] / "ml_anomaly_report.md",
+        "\n".join(
+            [
+                "# ML Anomaly Report",
+                "",
+                f"- IsolationForest flags: {summary.get('isolation_forest_flags', 0)}",
+                f"- LocalOutlierFactor flags: {summary.get('lof_flags', 0)}",
+                f"- Rows written: {len(anomaly_rows)}",
+                "",
+                "Anomaly flags are numerical triage aids. They are reliability warnings, not discoveries and not proof of physical transitions.",
+            ]
+        ),
+    )
+
+
+def run_monster_ml_analysis(rows: list[dict[str, Any]], ctx: AnalysisContext) -> dict[str, Any]:
     try:
         import numpy as np  # type: ignore
-        from sklearn.cluster import KMeans  # type: ignore
-        from sklearn.preprocessing import RobustScaler  # type: ignore
     except Exception as exc:
         ctx.optional_failures.append({"module": "ml", "reason": str(exc)})
         write_md(ctx.dirs["markdown"] / "ml_cluster_analysis.md", f"# ML Cluster Analysis\n\nML skipped: `{exc}`")
         write_csv(ctx.dirs["data"] / "ml_feature_importance.csv", [])
         write_csv(ctx.dirs["data"] / "ml_anomaly_cases.csv", [])
+        write_json(ctx.dirs["json"] / "ml_analysis_summary.json", {"status": "skipped", "reason": str(exc)})
         return {"status": "skipped", "reason": str(exc)}
-    features = ["largest_lyapunov", "hci", "energy_drift_rel", "angular_momentum_drift_rel", "spectrum_sum", "spectrum_pairing_residual", "closest_encounter"]
-    matrix = []
-    used_rows = []
-    for row in rows:
-        values = [as_float(row.get(feature)) for feature in features]
-        if any(math.isfinite(value) for value in values):
-            finite = [value if math.isfinite(value) else 0.0 for value in values]
-            matrix.append(finite)
-            used_rows.append(row)
-    if len(matrix) < 4:
-        write_md(ctx.dirs["markdown"] / "ml_cluster_analysis.md", "# ML Cluster Analysis\n\nInsufficient rows for exploratory ML.")
+
+    features, used_rows, raw_matrix, coverage_rows = build_ml_feature_matrix(rows)
+    write_csv(ctx.dirs["data"] / "ml_feature_coverage.csv", coverage_rows)
+    if len(raw_matrix) < ML_MIN_ROWS:
+        status = "insufficient_data"
+        write_md(ctx.dirs["markdown"] / "ml_cluster_analysis.md", f"# ML Cluster Analysis\n\nInsufficient rows for exploratory ML. Rows with usable features: {len(raw_matrix)}.")
+        write_csv(ctx.dirs["data"] / "ml_cluster_assignments.csv", [])
         write_csv(ctx.dirs["data"] / "ml_feature_importance.csv", [])
         write_csv(ctx.dirs["data"] / "ml_anomaly_cases.csv", [])
-        return {"status": "insufficient_data", "rows": len(matrix)}
-    x = RobustScaler().fit_transform(np.asarray(matrix, dtype=float))
-    k = min(3, len(matrix))
-    labels = KMeans(n_clusters=k, random_state=7, n_init=10).fit_predict(x)
-    cluster_rows = [{"run_id": row["run_id"], "cluster": int(label)} for row, label in zip(used_rows, labels)]
+        summary = {"status": status, "rows": len(raw_matrix), "min_rows": ML_MIN_ROWS, "claim_gate_note": "ML unavailable; no ML-supported claims allowed."}
+        write_json(ctx.dirs["json"] / "ml_analysis_summary.json", summary)
+        return summary
+
+    raw = np.asarray(raw_matrix, dtype=float)
+    x_scaled = robust_scale_numpy(raw)
+
+    algorithm, model, labels, cluster_diagnostics = choose_monster_cluster_model(x_scaled, ML_RANDOM_SEED)
+    labels = np.asarray(labels, dtype=int)
+    silhouette = safe_silhouette(x_scaled, labels)
+    dbcv = safe_dbcv(x_scaled, labels)
+    bootstrap = bootstrap_cluster_stability(x_scaled, labels, algorithm, ML_RANDOM_SEED)
+    ari_vs_lambda = lambda_label_ari(labels, used_rows)
+    anomaly_rows, anomaly_summary = run_anomaly_detectors(x_scaled, used_rows, ML_RANDOM_SEED)
+    importance_rows = compute_ml_feature_importance(features, x_scaled, labels, anomaly_rows, used_rows)
+    embedding_name, embedding, embedding_diagnostics = build_ml_embedding(x_scaled, ML_RANDOM_SEED)
+
+    cluster_rows: list[dict[str, Any]] = []
+    for index, row in enumerate(used_rows):
+        cluster_rows.append(
+            {
+                "run_id": row.get("run_id"),
+                "ic_mode": row.get("ic_mode"),
+                "run_type": row.get("run_type"),
+                "regime_label": row.get("regime_label"),
+                "lambda_only_label": row.get("lambda_only_label"),
+                "hci_label": row.get("hci_label"),
+                "reliability_pass": row.get("reliability_pass"),
+                "ml_cluster": int(labels[index]),
+                "embedding_method": embedding_name,
+                "embedding_x": float(embedding[index, 0]),
+                "embedding_y": float(embedding[index, 1]),
+            }
+        )
+    cluster_counts = dict(Counter(str(int(label)) for label in labels))
+    anomaly_summary = {**anomaly_summary, "anomaly_case_count": len(anomaly_rows)}
+    quality_gate_pass = bool(
+        math.isfinite(silhouette)
+        and silhouette >= ML_SILHOUETTE_TRUST_THRESHOLD
+        and math.isfinite(as_float(bootstrap.get("mean_adjusted_rand")))
+        and as_float(bootstrap.get("mean_adjusted_rand")) >= ML_BOOTSTRAP_ARI_TRUST_THRESHOLD
+        and labels_have_clusters(labels)
+    )
+    status = "trusted_exploratory" if quality_gate_pass else "exploratory_untrusted"
+    verdict = (
+        "EXPLORATORY_REGIME_STRUCTURE_SUPPORTED"
+        if quality_gate_pass
+        else "EXPLORATORY_ONLY_INSUFFICIENT_STABILITY"
+    )
+    summary = {
+        "status": status,
+        "verdict": verdict,
+        "rows": len(used_rows),
+        "features": features,
+        "algorithm": algorithm,
+        "cluster_count": cluster_count(labels),
+        "cluster_counts": cluster_counts,
+        "noise_fraction": float(np.mean(labels < 0)),
+        "silhouette": silhouette,
+        "dbcv": dbcv,
+        "bootstrap_stability": bootstrap,
+        "adjusted_rand_vs_lambda_only": ari_vs_lambda,
+        "anomaly_summary": anomaly_summary,
+        "embedding": {"method": embedding_name, **embedding_diagnostics},
+        "cluster_diagnostics": cluster_diagnostics,
+        "quality_gates": {
+            "silhouette_min": ML_SILHOUETTE_TRUST_THRESHOLD,
+            "bootstrap_mean_ari_min": ML_BOOTSTRAP_ARI_TRUST_THRESHOLD,
+            "passed": quality_gate_pass,
+        },
+        "reproducibility": {
+            "random_seed": ML_RANDOM_SEED,
+            "enabled_by": "--enable-ml or --mode ml",
+            "claim_gate_language": "exploratory regime clustering supports finite-time structure only when quality gates pass; no accuracy claim without ground truth",
+        },
+    }
+
     write_csv(ctx.dirs["data"] / "ml_cluster_assignments.csv", cluster_rows)
-    write_csv(ctx.dirs["data"] / "ml_feature_importance.csv", [{"feature": feature, "importance": ""} for feature in features])
-    write_csv(ctx.dirs["data"] / "ml_anomaly_cases.csv", [])
+    write_csv(ctx.dirs["data"] / "ml_feature_importance.csv", importance_rows)
+    write_csv(ctx.dirs["data"] / "ml_embedding.csv", cluster_rows)
+    write_json(ctx.dirs["json"] / "ml_analysis_summary.json", summary)
+    ml_anomaly_report(anomaly_rows, anomaly_summary, ctx)
+    plot_ml_clusters(embedding, labels, anomaly_rows, used_rows, embedding_name, ctx)
+    plot_ml_anomaly_heatmap(features, x_scaled, anomaly_rows, used_rows, ctx)
+    plot_ml_feature_importance(importance_rows, ctx)
     write_md(
         ctx.dirs["markdown"] / "ml_cluster_analysis.md",
-        "\n".join(["# ML Cluster Analysis", "", f"- Status: exploratory", f"- Rows clustered: {len(matrix)}", f"- Clusters: {k}", "", "ML clusters are exploratory unless validated by stability/bootstrap."]),
+        "\n".join(
+            [
+                "# ML Cluster Analysis",
+                "",
+                f"- Status: {status}",
+                f"- Verdict: {verdict}",
+                f"- Rows clustered: {len(used_rows)}",
+                f"- Features used: {len(features)}",
+                f"- Algorithm selected: {algorithm}",
+                f"- Clusters excluding noise: {cluster_count(labels)}",
+                f"- Noise fraction: {summary['noise_fraction']:.3f}",
+                f"- Silhouette: {silhouette if math.isfinite(silhouette) else 'nan'}",
+                f"- DBCV: {dbcv if math.isfinite(dbcv) else 'nan'}",
+                f"- Bootstrap mean ARI: {bootstrap.get('mean_adjusted_rand')}",
+                f"- ARI vs lambda-only labels: {ari_vs_lambda if math.isfinite(ari_vs_lambda) else 'nan'}",
+                f"- Anomaly cases: {len(anomaly_rows)}",
+                "",
+                "Claim gate: ML output is exploratory. It may support phrasing such as 'exploratory regime clustering supports finite-time structure' only when quality gates pass. It never supports 'more accurate' without external ground-truth labels.",
+            ]
+        ),
     )
-    return {"status": "exploratory", "rows": len(matrix), "clusters": k}
+    return summary
+
+
+def run_optional_ml(rows: list[dict[str, Any]], ctx: AnalysisContext) -> dict[str, Any]:
+    if not ctx.args.enable_ml and ctx.args.mode != "ml":
+        write_md(ctx.dirs["markdown"] / "ml_cluster_analysis.md", "# ML Cluster Analysis\n\nML was not enabled.")
+        write_csv(ctx.dirs["data"] / "ml_feature_importance.csv", [])
+        write_csv(ctx.dirs["data"] / "ml_anomaly_cases.csv", [])
+        write_json(ctx.dirs["json"] / "ml_analysis_summary.json", {"status": "not_enabled"})
+        return {"status": "not_enabled", "verdict": "NOT_ENABLED"}
+    return run_monster_ml_analysis(rows, ctx)
 
 
 def attribute_failures(
@@ -1838,21 +2580,26 @@ def build_claim_gate(
     hci: dict[str, Any],
     horizons: dict[str, Any],
     basin: dict[str, Any],
+    ml: dict[str, Any],
     ctx: AnalysisContext,
 ) -> dict[str, Any]:
+    ml_quality_pass = bool(nested_get(ml, [("quality_gates", "passed")], False))
     safe = [
         "Finite-time Lyapunov and composite diagnostics can be reported for runs with cited evidence files.",
         "Numerical reliability diagnostics are reliability vetoes, not direct chaos proof.",
         "Composite/HCI labels can be described as more informative or conservative only where disagreement/stability evidence is cited.",
     ]
+    if ml_quality_pass:
+        safe.append("Exploratory ML regime clustering supports finite-time structure in the analyzed feature space under stated quality gates.")
     conditional = [
         f"Ensemble convergence claims require status strong/moderate; current status is {ensemble['status']}.",
         "Asymptotic Lyapunov claims require asymptotic_numerical_support in the asymptotic gate.",
         "Fractal basin claims require a multi-outcome basin gate with convergence evidence.",
-        "ML clusters are exploratory unless stability/bootstrap validation is present.",
+        f"ML clusters are exploratory unless silhouette >= {ML_SILHOUETTE_TRUST_THRESHOLD} and bootstrap ARI >= {ML_BOOTSTRAP_ARI_TRUST_THRESHOLD}; current ML status is {ml.get('status', 'not_enabled')}.",
     ]
     unsafe = [
         "Do not claim HCI/composite classification is more accurate without external ground-truth labels.",
+        "Do not claim ML clusters are physically exact regimes or superior classifiers without external ground-truth labels.",
         "Do not claim asymptotic Lyapunov exponents unless the strict gate passes.",
         "Do not use figure-eight validation/reference runs as production evidence for positive asymptotic chaos.",
         "Do not claim fractal basin structure from single-outcome or unconverged maps.",
@@ -1877,12 +2624,15 @@ def build_claim_gate(
             "ground_truth_labels": not hci["objective_ground_truth_labels_available"],
             "asymptotic_support": not horizons["asymptotic_claim_allowed"],
             "fractal_basin_support": not basin["any_fractal_claim_allowed"],
+            "ml_quality_gate": not ml_quality_pass,
         },
         "supported_by_files": {
             "master_results": str(ctx.dirs["data"] / "master_results.csv"),
             "hci_vs_lambda": str(ctx.dirs["json"] / "hci_vs_lambda_summary.json"),
             "hci_vs_lambda_deep": str(ctx.dirs["json"] / "hci_vs_lambda_deep_summary.json"),
             "ensemble": str(ctx.dirs["json"] / "ensemble_convergence_status.json"),
+            "ml_analysis": str(ctx.dirs["json"] / "ml_analysis_summary.json"),
+            "ml_anomalies": str(ctx.dirs["json"] / "ml_anomaly_summary.json"),
             "big_ensemble_summary": ensemble.get("best_big_ensemble_summary", {}).get("source_file", ""),
             "reliability": str(ctx.dirs["markdown"] / "numerical_reliability_summary.md"),
             "evidence_traceability": str(ctx.dirs["data"] / "evidence_traceability.csv"),
@@ -1894,6 +2644,10 @@ def build_claim_gate(
             "hci_vs_lambda_verdict": hci["verdict"],
             "asymptotic_claim_allowed": horizons["asymptotic_claim_allowed"],
             "fractal_claim_allowed": basin["any_fractal_claim_allowed"],
+            "ml_status": ml.get("status", "not_enabled"),
+            "ml_quality_gate_passed": ml_quality_pass,
+            "ml_silhouette": ml.get("silhouette", ""),
+            "ml_bootstrap_mean_ari": nested_get(ml, [("bootstrap_stability", "mean_adjusted_rand")], ""),
         },
     }
     write_json(ctx.dirs["claim_gates"] / "final_claim_gate.json", gate)
@@ -2032,6 +2786,17 @@ def write_final_report(
         "",
         "## ML / Exploratory Clustering",
         f"- Status: {ml['status']}",
+        f"- Verdict: {ml.get('verdict', '')}",
+        f"- Algorithm: {ml.get('algorithm', '')}",
+        f"- Rows/features: {ml.get('rows', 0)} / {len(ml.get('features', [])) if isinstance(ml.get('features'), list) else 0}",
+        f"- Clusters: {ml.get('cluster_count', '')}",
+        f"- Silhouette: `{ml.get('silhouette', '')}`",
+        f"- DBCV: `{ml.get('dbcv', '')}`",
+        f"- Bootstrap mean ARI: `{nested_get(ml, [('bootstrap_stability', 'mean_adjusted_rand')], '')}`",
+        f"- ARI vs lambda-only labels: `{ml.get('adjusted_rand_vs_lambda_only', '')}`",
+        f"- Anomaly cases: `{nested_get(ml, [('anomaly_summary', 'anomaly_case_count')], '')}`",
+        f"- ML quality gate passed: `{nested_get(ml, [('quality_gates', 'passed')], False)}`",
+        "- ML findings are exploratory and cannot be used as accuracy claims without external ground-truth labels.",
         "",
         "## Failure Attribution",
         f"- Weak result count: {failures['weak_result_count']}",
@@ -2449,6 +3214,7 @@ def build_evidence_strength(
     parameters: dict[str, Any],
     figures: dict[str, Any],
     cross_integrator: dict[str, Any],
+    ml: dict[str, Any],
     rows: list[dict[str, Any]],
     ctx: AnalysisContext,
 ) -> list[dict[str, Any]]:
@@ -2469,6 +3235,14 @@ def build_evidence_strength(
     add("Poincare evidence", "paper_ready" if poincare.get("paper_ready") else "diagnostic_or_missing", 75.0 if poincare.get("paper_ready") else 25.0 if poincare.get("poincare_rows") else 0.0, f"poincare_rows={poincare.get('poincare_rows', 0)}")
     add("parameter sensitivity", "present" if parameters.get("parameter_sensitivity_rows") else "missing", 65.0 if parameters.get("parameter_sensitivity_rows") else 0.0, f"rows={parameters.get('parameter_sensitivity_rows', 0)}")
     add("plot/paper readiness", "present" if figures.get("figure_count") else "missing", 50.0 if figures.get("figure_count") else 0.0, f"figures={figures.get('figure_count', 0)}")
+    ml_quality_pass = bool(nested_get(ml, [("quality_gates", "passed")], False))
+    ml_score = 75.0 if ml_quality_pass else 35.0 if ml.get("status") == "exploratory_untrusted" else 10.0 if ml.get("status") in {"insufficient_data", "skipped"} else 0.0
+    add(
+        "exploratory ML regime structure",
+        ml.get("verdict", ml.get("status", "not_enabled")),
+        ml_score,
+        f"algorithm={ml.get('algorithm', '')}; silhouette={ml.get('silhouette', '')}; bootstrap_ari={nested_get(ml, [('bootstrap_stability', 'mean_adjusted_rand')], '')}; no accuracy claim without ground truth",
+    )
     reproducibility_rows = [row for row in rows if row.get("source_hash") or row.get("manifest_hash") or row.get("seed")]
     add("reproducibility completeness", "partial" if reproducibility_rows else "missing", bounded_score(len(reproducibility_rows) / len(rows) if rows else 0.0), f"rows_with_repro_metadata={len(reproducibility_rows)}")
     write_csv(ctx.dirs["data"] / "evidence_strength_matrix.csv", strength_rows)
@@ -2527,6 +3301,7 @@ def write_evidence_traceability(
     basin: dict[str, Any],
     poincare: dict[str, Any],
     cross_integrator: dict[str, Any],
+    ml: dict[str, Any],
     ctx: AnalysisContext,
 ) -> list[dict[str, Any]]:
     rows = [
@@ -2637,6 +3412,18 @@ def write_evidence_traceability(
             "reason": "low-crossing sections are diagnostic only",
             "limitations": "short or sparse sections may be misleading",
             "paper_wording": "Poincare plots are supporting diagnostics unless paper-ready",
+        },
+        {
+            "claim_id": "exploratory_ml_regime_clustering",
+            "claim_text": "Exploratory ML clustering supports finite-time regime structure.",
+            "claim_type": "conditional",
+            "support_status": ml.get("verdict", ml.get("status", "not_enabled")),
+            "evidence_files": str(ctx.dirs["json"] / "ml_analysis_summary.json") + ";" + str(ctx.dirs["data"] / "ml_cluster_assignments.csv") + ";" + str(ctx.dirs["data"] / "ml_anomaly_cases.csv"),
+            "evidence_metrics": f"algorithm={ml.get('algorithm', '')}; silhouette={ml.get('silhouette', '')}; bootstrap_ari={nested_get(ml, [('bootstrap_stability', 'mean_adjusted_rand')], '')}; anomalies={nested_get(ml, [('anomaly_summary', 'anomaly_case_count')], '')}",
+            "threshold_used": f"exploratory support requires silhouette>={ML_SILHOUETTE_TRUST_THRESHOLD} and bootstrap ARI>={ML_BOOTSTRAP_ARI_TRUST_THRESHOLD}",
+            "reason": "ML is used as feature-space structure analysis and anomaly triage only",
+            "limitations": "no accuracy or physical-regime proof without external ground-truth labels",
+            "paper_wording": "exploratory regime clustering supports finite-time feature-space structure where ML quality gates pass",
         },
     ]
     write_csv(ctx.dirs["data"] / "evidence_traceability.csv", rows)
@@ -2858,10 +3645,10 @@ def main() -> int:
     cross_integrator = analyze_cross_integrator_matches(scientific_rows, ctx)
     ml = run_optional_ml(scientific_rows, ctx)
     failures = attribute_failures(reliability, ensemble, hci, horizons, basin, scientific_rows, ctx)
-    evidence_strength = build_evidence_strength(reliability, ensemble, hci_deep, metastable, horizons, basin, poincare, parameters, figures, cross_integrator, scientific_rows, ctx)
+    evidence_strength = build_evidence_strength(reliability, ensemble, hci_deep, metastable, horizons, basin, poincare, parameters, figures, cross_integrator, ml, scientific_rows, ctx)
     verdict = final_verdict(scientific_rows, reliability, ensemble, hci)
-    gate = build_claim_gate(verdict, reliability, ensemble, hci, horizons, basin, ctx)
-    traceability = write_evidence_traceability(gate, reliability, ensemble, hci_deep, metastable, horizons, basin, poincare, cross_integrator, ctx)
+    gate = build_claim_gate(verdict, reliability, ensemble, hci, horizons, basin, ml, ctx)
+    traceability = write_evidence_traceability(gate, reliability, ensemble, hci_deep, metastable, horizons, basin, poincare, cross_integrator, ml, ctx)
     write_paper_assets(gate, ctx)
     write_paper_assets_v2(gate, traceability, evidence_strength, ctx)
     reproducibility = write_reproducibility_audit(scientific_rows, ctx)
