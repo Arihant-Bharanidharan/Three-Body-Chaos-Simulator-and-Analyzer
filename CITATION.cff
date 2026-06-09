@@ -7,5 +7,5 @@ authors:
     given-names: "Arihant"
 year: 2026
 license: "PolyForm-Noncommercial-1.0.0"
-repository-code: "https://github.com/Arihant-Bharanidharan/three-body-chaos-mapping"
+repository-code: "https://github.com/Arihant-Bharanidharan/Three-Body-Chaos-Simulator-and-Analyzer"
 abstract: "A source-available noncommercial computational framework for finite-time Newtonian three-body chaos diagnostics, heterogeneous ensemble validation, Lyapunov-spectrum analysis, conservation checks, reversibility testing, and claim-gated research reporting."

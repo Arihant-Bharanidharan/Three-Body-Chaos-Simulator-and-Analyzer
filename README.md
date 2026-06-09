@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-2563eb"></a>
-  <a href="https://github.com/Arihant-Bharanidharan/three-body-chaos-mapping/actions"><img alt="Validation" src="https://img.shields.io/github/actions/workflow/status/Arihant-Bharanidharan/three-body-chaos-mapping/validate.yml?branch=main&label=validation"></a>
+  <a href="https://github.com/Arihant-Bharanidharan/Three-Body-Chaos-Simulator-and-Analyzer/actions"><img alt="Validation" src="https://img.shields.io/github/actions/workflow/status/Arihant-Bharanidharan/Three-Body-Chaos-Simulator-and-Analyzer/validate.yml?branch=main&label=validation"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-64748b"></a>
   <img alt="Research prototype" src="https://img.shields.io/badge/status-research%20prototype-f97316">
   <img alt="Domain" src="https://img.shields.io/badge/domain-computational%20physics-7c3aed">
