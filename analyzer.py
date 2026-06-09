@@ -1,5 +1,5 @@
 # =============================================================================
-# CodexPy Analyzer - Paper-Grade Three-Body Chaos Analysis Engine
+# Three-Body Chaos Mapping Analyzer - Paper-Grade Analysis Engine
 # Copyright (c) 2026 Arihant Bharanidharan. All Rights Reserved.
 #
 # Contact: Arihantbharani@outlook.com
@@ -112,7 +112,7 @@ LICENSE_METADATA = {
 
 
 def print_runtime_notice() -> None:
-    print("=== CodexPy Analyzer - Copyright (c) 2026 Arihant Bharanidharan ===")
+    print("=== Three-Body Chaos Mapping Analyzer - Copyright (c) 2026 Arihant Bharanidharan ===")
     print("Contact: Arihantbharani@outlook.com")
     print("Licensed under PolyForm Noncommercial License 1.0.0")
     print("Commercial use requires prior written permission.")
@@ -390,7 +390,7 @@ class AnalysisContext:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Paper-grade deterministic analyzer for codexpy outputs.")
+    parser = argparse.ArgumentParser(description="Paper-grade deterministic analyzer for three-body chaos mapping outputs.")
     parser.add_argument("--input", nargs="+", required=True, help="Input path(s), directory globs, or file globs.")
     parser.add_argument("--output", default="analysis_outputs", help="Base output directory.")
     parser.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=True)
@@ -797,7 +797,12 @@ def extract_summary_row(bundle: RunBundle, loaded: dict[str, Any], ctx: Analysis
     row["tolerance"] = config.get("rtol")
     row["max_step"] = config.get("max_step")
     row["output_schema_version"] = summary.get("schema_version") or claim_gate.get("schema_version")
-    row["source_hash"] = nested_get(summary, [("reproducibility", "source_hashes", "codexpy.py", "sha256"), ("reproducibility", "source_hashes", "codexpy.py")])
+    row["source_hash"] = nested_get(summary, [
+        ("reproducibility", "source_hashes", "three_body_chaos.py", "sha256"),
+        ("reproducibility", "source_hashes", "three_body_chaos.py"),
+        ("reproducibility", "source_hashes", "codexpy.py", "sha256"),
+        ("reproducibility", "source_hashes", "codexpy.py"),
+    ])
     row["manifest_hash"] = nested_get(summary, [("reproducibility", "manifest_hash"), ("reproducibility", "dependency_lock", "sha256")])
     row["mass_min"] = config.get("mass_min") or initial_config.get("mass_min")
     row["mass_max"] = config.get("mass_max") or initial_config.get("mass_max")
@@ -2516,7 +2521,7 @@ def write_evidence_traceability(
 
 def write_recommended_next_runs(gate: dict[str, Any], ensemble: dict[str, Any], hci_deep: dict[str, Any], cross_integrator: dict[str, Any], horizons: dict[str, Any], basin: dict[str, Any], ctx: AnalysisContext) -> dict[str, Any]:
     py = str(Path(sys.executable).resolve())
-    codexpy = str(Path(__file__).resolve().with_name("codexpy.py"))
+    simulator = str(Path(__file__).resolve().with_name("three_body_chaos.py"))
     out = "analysis_ready_runs"
     recs: list[dict[str, Any]] = []
 
@@ -2524,17 +2529,17 @@ def write_recommended_next_runs(gate: dict[str, Any], ensemble: dict[str, Any], 
         recs.append({"reason": reason, "windows_command": command, "unix_command": command.replace("\\", "/")})
 
     if ensemble.get("status") in {"weak", "insufficient_data"}:
-        add("Strengthen ensemble convergence with production true-run summaries.", f'& "{py}" "{codexpy}" --advanced --true-run --true-run-compact --ic-mode random_chaotic --ensemble-seeds 1,2,3,4,5 --samples 2000 --duration 50 --output-dir "{out}\\ensemble_true_runs"')
+        add("Strengthen ensemble convergence with production true-run summaries.", f'& "{py}" "{simulator}" --advanced --true-run --true-run-compact --ic-mode random_chaotic --ensemble-seeds 1,2,3,4,5 --samples 2000 --duration 50 --output-dir "{out}\\ensemble_true_runs"')
     if hci_deep.get("verdict") in {"INSUFFICIENT_DATA", "NO_DEMONSTRATED_ADVANTAGE"}:
-        add("Create replayable subset for direct lambda-only versus composite comparison.", f'& "{py}" "{codexpy}" --advanced --true-run --true-run-compact --ic-mode random_metastable --seed 42042 --samples 3000 --duration 75 --output-dir "{out}\\hci_lambda_replay_subset"')
+        add("Create replayable subset for direct lambda-only versus composite comparison.", f'& "{py}" "{simulator}" --advanced --true-run --true-run-compact --ic-mode random_metastable --seed 42042 --samples 3000 --duration 75 --output-dir "{out}\\hci_lambda_replay_subset"')
     if cross_integrator.get("status") == "INSUFFICIENT_DATA":
-        add("Generate matched DOP853/IAS15 replay evidence.", f'& "{py}" "{codexpy}" --advanced --true-run --true-run-compact --benchmark-integrators --ic-mode random_hierarchical --seed 52052 --samples 3000 --duration 75 --output-dir "{out}\\cross_integrator_replay"')
+        add("Generate matched DOP853/IAS15 replay evidence.", f'& "{py}" "{simulator}" --advanced --true-run --true-run-compact --benchmark-integrators --ic-mode random_hierarchical --seed 52052 --samples 3000 --duration 75 --output-dir "{out}\\cross_integrator_replay"')
     if not horizons.get("asymptotic_claim_allowed"):
-        add("Run a finite-time horizon sweep for robustness only; asymptotic positivity may still remain unsupported.", f'& "{py}" "{codexpy}" --advanced --true-run --true-run-compact --lyapunov-horizon-sweep --ic-mode random_chaotic --seed 62062 --duration 100 --output-dir "{out}\\horizon_sweep"')
+        add("Run a finite-time horizon sweep for robustness only; asymptotic positivity may still remain unsupported.", f'& "{py}" "{simulator}" --advanced --true-run --true-run-compact --lyapunov-horizon-sweep --ic-mode random_chaotic --seed 62062 --duration 100 --output-dir "{out}\\horizon_sweep"')
     if not basin.get("any_fractal_claim_allowed"):
-        add("Run basin scan on a likely mixed-outcome regime; avoid figure-eight as production evidence.", f'& "{py}" "{codexpy}" --advanced --true-run --true-run-compact --basin-auto-expand --ic-mode near_collision --seed 72072 --basin-grid 96 --basin-horizon 30 --output-dir "{out}\\basin_mixed_outcome"')
+        add("Run basin scan on a likely mixed-outcome regime; avoid figure-eight as production evidence.", f'& "{py}" "{simulator}" --advanced --true-run --true-run-compact --basin-auto-expand --ic-mode near_collision --seed 72072 --basin-grid 96 --basin-horizon 30 --output-dir "{out}\\basin_mixed_outcome"')
     if not recs:
-        add("Current analyzer evidence is adequate for conservative finite-time claims; run a matched cross-integrator replay for reviewer resilience.", f'& "{py}" "{codexpy}" --advanced --true-run --true-run-compact --benchmark-integrators --ic-mode unequal_mass --seed 82082 --output-dir "{out}\\reviewer_resilience"')
+        add("Current analyzer evidence is adequate for conservative finite-time claims; run a matched cross-integrator replay for reviewer resilience.", f'& "{py}" "{simulator}" --advanced --true-run --true-run-compact --benchmark-integrators --ic-mode unequal_mass --seed 82082 --output-dir "{out}\\reviewer_resilience"')
     write_json(ctx.dirs["json"] / "recommended_next_runs.json", recs)
     write_md(ctx.dirs["markdown"] / "recommended_next_runs.md", "\n".join(["# Recommended Next Runs", "", *[f"## {index + 1}. {item['reason']}\n\n```powershell\n{item['windows_command']}\n```" for index, item in enumerate(recs)]]))
     ps1 = ["# Recommended analyzer-strengthening commands", "$ErrorActionPreference = 'Stop'", ""]
@@ -2621,7 +2626,7 @@ def write_paper_assets_v2(gate: dict[str, Any], traceability: list[dict[str, Any
     write_md(ctx.dirs["paper_assets"] / "paper_outline.md", f"# Paper Outline\n\n1. Motivation\n2. Newtonian three-body methods\n3. Composite finite-time diagnostics\n4. Evidence strength and claim gates\n5. Results\n6. Limitations\n7. Reproducibility\n\nCore conservative result: {safe_wording}")
     write_md(ctx.dirs["paper_assets"] / "paper_abstract_conservative.md", f"# Conservative Abstract\n\nThis study evaluates finite-time regime classification in Newtonian three-body simulations using Lyapunov, composite/HCI, and conservation-law diagnostics. {safe_wording}")
     write_md(ctx.dirs["paper_assets"] / "paper_introduction_skeleton.md", "# Introduction Skeleton\n\n- Three-body dynamics motivate finite-time diagnostics.\n- Largest Lyapunov estimates alone can miss numerical reliability context.\n- This work evaluates a conservative composite diagnostic framework.")
-    write_md(ctx.dirs["paper_assets"] / "paper_methods_simulator.md", "# Simulator Methods\n\nDescribe `codexpy.py` runs, initial-condition modes, integrators, reliability diagnostics, and replay metadata. Do not describe analyzer-only folders as simulations.")
+    write_md(ctx.dirs["paper_assets"] / "paper_methods_simulator.md", "# Simulator Methods\n\nDescribe `three_body_chaos.py` runs, initial-condition modes, integrators, reliability diagnostics, and replay metadata. Do not describe analyzer-only folders as simulations.")
     write_md(ctx.dirs["paper_assets"] / "paper_methods_analyzer.md", "# Analyzer Methods\n\nThe analyzer ingests existing artifacts, filters pseudo-run folders, maps claims to evidence files, and applies conservative claim gates without rerunning simulations.")
     write_md(ctx.dirs["paper_assets"] / "paper_results_evidence.md", "\n".join(["# Results Evidence", "", *[f"- {row['evidence_area']}: {row['confidence_label']} ({row['score']})" for row in strength_rows]]))
     write_md(ctx.dirs["paper_assets"] / "paper_discussion.md", "# Discussion\n\nThe safest interpretation is finite-time composite regime classification. Accuracy, asymptotic, and fractal claims require their separate gates.")

@@ -1,5 +1,5 @@
 # =============================================================================
-# CodexPy - High-Precision Paranoid Three-Body Chaos Simulator
+# Mapping Stability and Chaos in the Three-Body Problem
 # Copyright (c) 2026 Arihant Bharanidharan. All Rights Reserved.
 #
 # Contact: Arihantbharani@outlook.com
@@ -71,7 +71,7 @@ def with_report_notice(lines: list[str]) -> list[str]:
 
 
 def print_runtime_notice() -> None:
-    print("=== CodexPy - Copyright (c) 2026 Arihant Bharanidharan ===")
+    print("=== Three-Body Chaos Mapping - Copyright (c) 2026 Arihant Bharanidharan ===")
     print("Contact: Arihantbharani@outlook.com")
     print("Licensed under PolyForm Noncommercial License 1.0.0")
     print("Commercial use requires prior written permission.")
@@ -5534,7 +5534,7 @@ def claim_gate_evaluation(
             "Issue": "Reports lacked explicit safe/conditional/unsafe claim gating.",
             "Why it matters": "The core hypothesis can be overstated if validation status is not tied to allowed claims.",
             "Action taken": "Added automatic claim gate output and closure artifacts.",
-            "Files changed": ["codexpy.py"],
+            "Files changed": ["three_body_chaos.py"],
             "Validation performed": "Verified generated claim_gate.md and validation_summary.json in smoke outputs.",
             "Residual limitation": "Claim gate is conservative and depends on diagnostics actually run.",
             "Status": "FIXED",
@@ -5545,7 +5545,7 @@ def claim_gate_evaluation(
             "Issue": "Finite-time diagnostics could be read as asymptotic Lyapunov claims.",
             "Why it matters": "The stated hypothesis concerns finite-time regimes; asymptotic claims need longer convergence evidence.",
             "Action taken": "Added explicit finite-time wording and unsafe asymptotic-claim gate.",
-            "Files changed": ["codexpy.py"],
+            "Files changed": ["three_body_chaos.py"],
             "Validation performed": "Report and claim gate include finite-time wording.",
             "Residual limitation": "Long-horizon asymptotic studies remain optional future work.",
             "Status": "FIXED",
@@ -5556,7 +5556,7 @@ def claim_gate_evaluation(
             "Issue": "Unsupported physical claims were not surfaced automatically.",
             "Why it matters": "Reviewer-facing outputs must identify claims not supported by the current run.",
             "Action taken": "Generated known limitations, future work, and unsafe-claims sections per run.",
-            "Files changed": ["codexpy.py"],
+            "Files changed": ["three_body_chaos.py"],
             "Validation performed": "Closure artifacts are generated with each report.",
             "Residual limitation": "Human paper text must still quote the correct generated claims.",
             "Status": "FIXED",
@@ -5567,7 +5567,7 @@ def claim_gate_evaluation(
             "Issue": "Reproducibility manifest lacked source hash and dependency lock data.",
             "Why it matters": "Paper runs need replay metadata independent of git availability.",
             "Action taken": "Added source SHA256, manifest hash, and pip-freeze dependency snapshot.",
-            "Files changed": ["codexpy.py"],
+            "Files changed": ["three_body_chaos.py"],
             "Validation performed": "reproducibility_manifest.json is checked after smoke runs.",
             "Residual limitation": "Exact floating-point replay can still vary by hardware/BLAS/CUDA.",
             "Status": "FIXED",
@@ -5578,7 +5578,7 @@ def claim_gate_evaluation(
             "Issue": "Analyzer reliability needed an explicit contradictory-run summary.",
             "Why it matters": "Composite diagnostics can disagree; that must be visible without manual JSON inspection.",
             "Action taken": "Closure outputs include diagnostic consistency and reliability horizon statuses.",
-            "Files changed": ["codexpy.py"],
+            "Files changed": ["three_body_chaos.py"],
             "Validation performed": "Advanced smoke run produced diagnostic_consistency status.",
             "Residual limitation": "Order-of-magnitude consistency is not a formal statistical agreement test.",
             "Status": "FIXED",

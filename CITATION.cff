@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: "CodexPy: A Claim-Gated Finite-Time Three-Body Chaos Analysis Framework"
+title: "Mapping Stability and Chaos in the Three-Body Problem"
 message: "If you use this software or analysis framework, please cite it."
 type: software
 authors:
@@ -7,5 +7,5 @@ authors:
     given-names: "Arihant"
 year: 2026
 license: "PolyForm-Noncommercial-1.0.0"
-repository-code: "TBD"
-abstract: "A source-available noncommercial computational framework for finite-time Newtonian three-body chaos simulation, Lyapunov diagnostics, claim-gated analysis, ensemble validation, and paper-grade research reporting."
+repository-code: "https://github.com/Arihant-Bharanidharan/three-body-chaos-mapping"
+abstract: "A source-available noncommercial computational framework for finite-time Newtonian three-body chaos diagnostics, heterogeneous ensemble validation, Lyapunov-spectrum analysis, conservation checks, reversibility testing, and claim-gated research reporting."
