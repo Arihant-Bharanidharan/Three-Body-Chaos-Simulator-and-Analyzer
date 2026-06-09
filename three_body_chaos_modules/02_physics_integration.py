@@ -1,5 +1,5 @@
-﻿# Auto-split implementation module for 3BS-Simulator.py.
-# Generated from the original monolithic simulator to keep the CLI stable while making the codebase navigable.
+# Auto-split implementation module for 3BS-Simulator.py.
+# Generated from codexpy.py so the public GitHub simulator tracks the local monolithic research engine.
 
 # =========================
 # PHYSICS

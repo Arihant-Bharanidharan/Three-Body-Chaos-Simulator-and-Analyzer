@@ -1,5 +1,5 @@
-﻿# Auto-split implementation module for 3BS-Simulator.py.
-# Generated from the original monolithic simulator to keep the CLI stable while making the codebase navigable.
+# Auto-split implementation module for 3BS-Simulator.py.
+# Generated from codexpy.py so the public GitHub simulator tracks the local monolithic research engine.
 
 # =========================
 # GPU ENSEMBLE DIAGNOSTIC
@@ -237,10 +237,36 @@ def ensemble_growth_ias15(config: RunConfig, ic: InitialCondition, started: floa
     )
     reference_final = integrate_to_time(ic.state, ic.mass, duration, solver_config)
     sep_np = np.empty(config.ensemble_size, dtype=np.float64)
-    for i in range(config.ensemble_size):
-        perturbed_state = pack_state(base_pos[i] + dpos[i], base_vel[i] + dvel[i])
-        final_state = integrate_to_time(perturbed_state, ic.mass, duration, solver_config)
-        sep_np[i] = state_norm(final_state - reference_final)
+    started_progress = False
+    if not progress_active():
+        progress_start(
+            config.ensemble_size,
+            "IAS15 ensemble",
+            {
+                "ic": config.ic_mode,
+                "backend": "rebound",
+                "integrator": "IAS15",
+                "ensemble": f"0/{config.ensemble_size}",
+            },
+        )
+        started_progress = True
+    try:
+        for i in range(config.ensemble_size):
+            perturbed_state = pack_state(base_pos[i] + dpos[i], base_vel[i] + dvel[i])
+            final_state = integrate_to_time(perturbed_state, ic.mass, duration, solver_config)
+            sep_np[i] = state_norm(final_state - reference_final)
+            if started_progress:
+                current_growth = math.log(max(float(sep_np[i]), DIST_FLOOR) / max(config.perturbation, DIST_FLOOR))
+                progress_update(
+                    1,
+                    {
+                        "ensemble": f"{i + 1}/{config.ensemble_size}",
+                        "lambda": f"{current_growth / max(duration, DIST_FLOOR):.3e}",
+                    },
+                )
+    finally:
+        if started_progress:
+            progress_close()
     growth_np = np.log(np.maximum(sep_np, DIST_FLOOR) / config.perturbation)
     note = (
         "REBOUND IAS15 adaptive high-order ensemble path. CUDA does not provide IAS15 in this framework, "
@@ -271,6 +297,7 @@ def ensemble_growth(config: RunConfig, ic: InitialCondition) -> EnsembleResult:
     if config.gpu:
         use_gpu, gpu_name = gpu_available()
     xp = load_cupy() if use_gpu else np
+    label = f"cupy:{gpu_name}" if use_gpu else "numpy:cpu"
 
     pos0, vel0, mass = ic.pos, ic.vel, ic.mass
     base_pos, base_vel, dpos, dvel = ensemble_perturbed_states(config, ic)
@@ -282,25 +309,54 @@ def ensemble_growth(config: RunConfig, ic: InitialCondition) -> EnsembleResult:
     mass_xp = xp.asarray(mass)
 
     dt = config.dt
-    for _ in range(config.ensemble_steps):
-        if ensemble_integrator == "dopri5":
-            pos, vel = batched_dopri5_step(pos, vel, mass_xp, xp, dt, config.softening)
-            ref_pos, ref_vel = batched_dopri5_step(ref_pos, ref_vel, mass_xp, xp, dt, config.softening)
-        elif ensemble_integrator == "rk4":
-            pos, vel = batched_rk4_step(pos, vel, mass_xp, xp, dt, config.softening)
-            ref_pos, ref_vel = batched_rk4_step(ref_pos, ref_vel, mass_xp, xp, dt, config.softening)
-        else:
-            acc = batch_accelerations(pos, mass_xp, xp, config.softening)
-            ref_acc = batch_accelerations(ref_pos, mass_xp, xp, config.softening)
+    started_progress = False
+    update_every = max(1, config.ensemble_steps // 200)
+    pending_updates = 0
+    if not progress_active():
+        progress_start(
+            config.ensemble_steps,
+            "Batched ensemble",
+            {
+                "ic": config.ic_mode,
+                "backend": label,
+                "integrator": ensemble_integrator,
+                "ensemble": f"N={config.ensemble_size}",
+            },
+        )
+        started_progress = True
+    try:
+        for step in range(config.ensemble_steps):
+            if ensemble_integrator == "dopri5":
+                pos, vel = batched_dopri5_step(pos, vel, mass_xp, xp, dt, config.softening)
+                ref_pos, ref_vel = batched_dopri5_step(ref_pos, ref_vel, mass_xp, xp, dt, config.softening)
+            elif ensemble_integrator == "rk4":
+                pos, vel = batched_rk4_step(pos, vel, mass_xp, xp, dt, config.softening)
+                ref_pos, ref_vel = batched_rk4_step(ref_pos, ref_vel, mass_xp, xp, dt, config.softening)
+            else:
+                acc = batch_accelerations(pos, mass_xp, xp, config.softening)
+                ref_acc = batch_accelerations(ref_pos, mass_xp, xp, config.softening)
 
-            pos = pos + vel * dt + 0.5 * acc * dt * dt
-            ref_pos = ref_pos + ref_vel * dt + 0.5 * ref_acc * dt * dt
+                pos = pos + vel * dt + 0.5 * acc * dt * dt
+                ref_pos = ref_pos + ref_vel * dt + 0.5 * ref_acc * dt * dt
 
-            acc_new = batch_accelerations(pos, mass_xp, xp, config.softening)
-            ref_acc_new = batch_accelerations(ref_pos, mass_xp, xp, config.softening)
+                acc_new = batch_accelerations(pos, mass_xp, xp, config.softening)
+                ref_acc_new = batch_accelerations(ref_pos, mass_xp, xp, config.softening)
 
-            vel = vel + 0.5 * (acc + acc_new) * dt
-            ref_vel = ref_vel + 0.5 * (ref_acc + ref_acc_new) * dt
+                vel = vel + 0.5 * (acc + acc_new) * dt
+                ref_vel = ref_vel + 0.5 * (ref_acc + ref_acc_new) * dt
+            pending_updates += 1
+            if started_progress and (pending_updates >= update_every or step + 1 == config.ensemble_steps):
+                progress_update(
+                    pending_updates,
+                    {
+                        "ensemble": f"step {step + 1}/{config.ensemble_steps}, N={config.ensemble_size}",
+                        "status": "propagating",
+                    },
+                )
+                pending_updates = 0
+    finally:
+        if started_progress:
+            progress_close()
 
     sep = xp.sqrt(xp.sum((pos - ref_pos) ** 2, axis=(1, 2)) + xp.sum((vel - ref_vel) ** 2, axis=(1, 2)))
     log_growth = xp.log(sep / config.perturbation)
@@ -313,7 +369,6 @@ def ensemble_growth(config: RunConfig, ic: InitialCondition) -> EnsembleResult:
         sep_np = np.asarray(sep)
         growth_np = np.asarray(log_growth)
 
-    label = f"cupy:{gpu_name}" if use_gpu else "numpy:cpu"
     if ensemble_integrator == "dopri5":
         integrator_note = "Batched fixed-step Dormand-Prince 5th-order Runge-Kutta ensemble path. This is higher order than RK4 and can run on CuPy/CUDA, but it is still a fixed-step ensemble proxy rather than adaptive IAS15/DOP853."
     elif ensemble_integrator == "rk4":

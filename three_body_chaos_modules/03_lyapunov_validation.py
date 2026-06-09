@@ -1,5 +1,5 @@
-﻿# Auto-split implementation module for 3BS-Simulator.py.
-# Generated from the original monolithic simulator to keep the CLI stable while making the codebase navigable.
+# Auto-split implementation module for 3BS-Simulator.py.
+# Generated from codexpy.py so the public GitHub simulator tracks the local monolithic research engine.
 
 # =========================
 # LYAPUNOV
@@ -36,8 +36,12 @@ def initial_tangent_basis_for_pairing_order(config: RunConfig) -> np.ndarray:
     raise ValueError(f"Unsupported Lyapunov pairing order: {config.lyapunov_pairing_order}")
 
 
-def qr_lyapunov_raw(config: RunConfig, renorm_time: float | None = None) -> tuple[dict[str, Any], np.ndarray]:
-    ic = generate_initial_condition(config)
+def qr_lyapunov_raw(
+    config: RunConfig,
+    renorm_time: float | None = None,
+    initial_condition: InitialCondition | None = None,
+) -> tuple[dict[str, Any], np.ndarray]:
+    ic = initial_condition if initial_condition is not None else generate_initial_condition(config)
     mass = ic.mass
     state = ic.state
     cfg = replace(solver_config_for_initial_condition(config, ic), backend="scipy")
@@ -58,67 +62,94 @@ def qr_lyapunov_raw(config: RunConfig, renorm_time: float | None = None) -> tupl
     elapsed_model_time = 0.0
     max_orthogonality_error = 0.0
     max_condition_number = 1.0
+    total_windows = max(1, int(math.floor(config.lyapunov_time / max(window, DIST_FLOOR) + 1e-12)))
+    started_progress = False
+    if not progress_active():
+        progress_start(
+            total_windows,
+            "QR Lyapunov spectrum",
+            {
+                "ic": config.ic_mode,
+                "backend": "scipy",
+                "integrator": "DOP853",
+                "lambda": "--",
+            },
+        )
+        started_progress = True
 
     solve_kwargs: dict[str, Any] = {}
     if cfg.max_step > 0.0:
         solve_kwargs["max_step"] = cfg.max_step
 
-    while elapsed_model_time + 0.5 * window <= config.lyapunov_time:
-        qv_tangent_basis = to_qv @ tangent_basis
-        augmented0 = np.concatenate([state, qv_tangent_basis.reshape(-1)])
-        solution = solve_ivp(
-            tangent_rhs,
-            (0.0, window),
-            augmented0,
-            args=(mass, cfg.softening),
-            method="DOP853",
-            rtol=cfg.rtol,
-            atol=cfg.atol,
-            **solve_kwargs,
-        )
-        if not solution.success:
-            raise RuntimeError(f"QR Lyapunov tangent integration failed: {solution.message}")
+    try:
+        while elapsed_model_time + 0.5 * window <= config.lyapunov_time:
+            qv_tangent_basis = to_qv @ tangent_basis
+            augmented0 = np.concatenate([state, qv_tangent_basis.reshape(-1)])
+            solution = solve_ivp(
+                tangent_rhs,
+                (0.0, window),
+                augmented0,
+                args=(mass, cfg.softening),
+                method="DOP853",
+                rtol=cfg.rtol,
+                atol=cfg.atol,
+                **solve_kwargs,
+            )
+            if not solution.success:
+                raise RuntimeError(f"QR Lyapunov tangent integration failed: {solution.message}")
 
-        state = solution.y[:STATE_SIZE, -1]
-        tangent_flow_qv = solution.y[STATE_SIZE:, -1].reshape(STATE_SIZE, STATE_SIZE)
-        tangent_flow = to_qp @ tangent_flow_qv
-        if not (np.isfinite(state).all() and np.isfinite(tangent_flow).all()):
-            raise RuntimeError("QR Lyapunov tangent integration produced non-finite values.")
+            state = solution.y[:STATE_SIZE, -1]
+            tangent_flow_qv = solution.y[STATE_SIZE:, -1].reshape(STATE_SIZE, STATE_SIZE)
+            tangent_flow = to_qp @ tangent_flow_qv
+            if not (np.isfinite(state).all() and np.isfinite(tangent_flow).all()):
+                raise RuntimeError("QR Lyapunov tangent integration produced non-finite values.")
 
-        try:
-            condition_number = float(np.linalg.cond(tangent_flow))
-        except np.linalg.LinAlgError:
-            condition_number = float("inf")
-        if np.isfinite(condition_number):
-            max_condition_number = max(max_condition_number, condition_number)
-        else:
-            max_condition_number = float("inf")
-        condition_numbers.append(condition_number)
+            try:
+                condition_number = float(np.linalg.cond(tangent_flow))
+            except np.linalg.LinAlgError:
+                condition_number = float("inf")
+            if np.isfinite(condition_number):
+                max_condition_number = max(max_condition_number, condition_number)
+            else:
+                max_condition_number = float("inf")
+            condition_numbers.append(condition_number)
 
-        q_matrix, r_matrix = np.linalg.qr(tangent_flow)
-        diagonal = np.diag(r_matrix)
-        signs = np.where(diagonal < 0.0, -1.0, 1.0)
-        signs[diagonal == 0.0] = 1.0
-        q_matrix = q_matrix * signs[None, :]
-        r_matrix = signs[:, None] * r_matrix
-        diagonal = np.diag(r_matrix)
-        log_diagonal = np.log(np.maximum(np.abs(diagonal), DIST_FLOOR))
+            q_matrix, r_matrix = np.linalg.qr(tangent_flow)
+            diagonal = np.diag(r_matrix)
+            signs = np.where(diagonal < 0.0, -1.0, 1.0)
+            signs[diagonal == 0.0] = 1.0
+            q_matrix = q_matrix * signs[None, :]
+            r_matrix = signs[:, None] * r_matrix
+            diagonal = np.diag(r_matrix)
+            log_diagonal = np.log(np.maximum(np.abs(diagonal), DIST_FLOOR))
 
-        tangent_basis = q_matrix
-        orthogonality_error = float(np.linalg.norm(tangent_basis.T @ tangent_basis - np.eye(STATE_SIZE), ord="fro"))
-        max_orthogonality_error = max(max_orthogonality_error, orthogonality_error)
-        orthogonality_errors.append(orthogonality_error)
+            tangent_basis = q_matrix
+            orthogonality_error = float(np.linalg.norm(tangent_basis.T @ tangent_basis - np.eye(STATE_SIZE), ord="fro"))
+            max_orthogonality_error = max(max_orthogonality_error, orthogonality_error)
+            orthogonality_errors.append(orthogonality_error)
 
-        segment_log_diagonals.append(log_diagonal.tolist())
-        segment_log_growths.append(float(np.max(log_diagonal)))
-        log_sums += log_diagonal
-        renormalizations += 1
-        elapsed_model_time += window
+            segment_log_diagonals.append(log_diagonal.tolist())
+            segment_log_growths.append(float(np.max(log_diagonal)))
+            log_sums += log_diagonal
+            renormalizations += 1
+            elapsed_model_time += window
 
-        current_spectrum = log_sums / elapsed_model_time
-        running_times.append(elapsed_model_time)
-        running_exponents.append(float(np.max(current_spectrum)))
-        running_spectra.append(sorted((float(value) for value in current_spectrum), reverse=True))
+            current_spectrum = log_sums / elapsed_model_time
+            lambda_now = float(np.max(current_spectrum))
+            running_times.append(elapsed_model_time)
+            running_exponents.append(lambda_now)
+            running_spectra.append(sorted((float(value) for value in current_spectrum), reverse=True))
+            if started_progress:
+                progress_update(
+                    1,
+                    {
+                        "lambda": f"{lambda_now:.3e}",
+                        "status": f"QR {renormalizations}/{total_windows}",
+                    },
+                )
+    finally:
+        if started_progress:
+            progress_close()
 
     if renormalizations == 0:
         raise RuntimeError("Lyapunov spectrum requested zero renormalization windows.")
@@ -144,9 +175,9 @@ def qr_lyapunov_raw(config: RunConfig, renorm_time: float | None = None) -> tupl
     }, mass
 
 
-def lyapunov_benettin(config: RunConfig) -> tuple[LyapunovResult, np.ndarray]:
+def lyapunov_benettin(config: RunConfig, initial_condition: InitialCondition | None = None) -> tuple[LyapunovResult, np.ndarray]:
     started = time.perf_counter()
-    raw, mass = qr_lyapunov_raw(config)
+    raw, mass = qr_lyapunov_raw(config, initial_condition=initial_condition)
     final_spectrum = raw["final_spectrum"]
     validation = lyapunov_spectrum_validation(
         config,
@@ -530,50 +561,68 @@ def lyapunov_horizon_candidates(config: RunConfig) -> list[float]:
 
 def lyapunov_horizon_sweep_analysis(config: RunConfig) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
-    for horizon in lyapunov_horizon_candidates(config):
-        local_config = replace(config, lyapunov_time=float(horizon))
-        try:
-            raw, _mass = qr_lyapunov_raw(local_config)
-            spectrum = np.sort(np.asarray(raw["final_spectrum"], dtype=float))[::-1]
-            local_exponents = np.asarray(raw["segment_log_growths"], dtype=float) / max(float(raw["renorm_time"]), DIST_FLOOR)
-            ci = block_bootstrap_mean_ci(local_exponents, seed=config.seed + int(1000 * horizon), draws=500)
-            running = np.asarray(raw["running_exponents"], dtype=float)
-            if len(running) >= 4:
-                tail = running[len(running) // 2 :]
-                times = np.asarray(raw["running_times"], dtype=float)[len(running) // 2 :]
-                slope = float(np.polyfit(times, tail, 1)[0])
-            else:
-                slope = float("nan")
-            pairing = spectrum + spectrum[::-1]
-            rows.append(
-                {
-                    "horizon": float(horizon),
-                    "largest_finite_time_lyapunov": float(spectrum[0]),
-                    "spectrum_sum": float(np.sum(spectrum)),
-                    "max_pairing_residual": float(np.max(np.abs(pairing))),
-                    "qr_orthogonality_error": float(raw["max_orthogonality_error"]),
-                    "renormalization_count": int(raw["renormalizations"]),
-                    "ci95_low": ci["ci_95"][0],
-                    "ci95_high": ci["ci_95"][1],
-                    "convergence_slope_tail": slope,
-                    "status": "ok",
-                }
-            )
-        except Exception as exc:
-            rows.append(
-                {
-                    "horizon": float(horizon),
-                    "largest_finite_time_lyapunov": float("nan"),
-                    "spectrum_sum": float("nan"),
-                    "max_pairing_residual": float("nan"),
-                    "qr_orthogonality_error": float("nan"),
-                    "renormalization_count": 0,
-                    "ci95_low": float("nan"),
-                    "ci95_high": float("nan"),
-                    "convergence_slope_tail": float("nan"),
-                    "status": f"failed: {exc}",
-                }
-            )
+    horizons = lyapunov_horizon_candidates(config)
+    started_progress = False
+    if not progress_active():
+        progress_start(
+            len(horizons),
+            "Lyapunov horizon sweep",
+            {"ic": config.ic_mode, "backend": "scipy", "integrator": "DOP853", "lambda": "--"},
+        )
+        started_progress = True
+    try:
+        iterator = horizons
+        for horizon in iterator:
+            local_config = replace(config, lyapunov_time=float(horizon))
+            try:
+                raw, _mass = qr_lyapunov_raw(local_config)
+                spectrum = np.sort(np.asarray(raw["final_spectrum"], dtype=float))[::-1]
+                local_exponents = np.asarray(raw["segment_log_growths"], dtype=float) / max(float(raw["renorm_time"]), DIST_FLOOR)
+                ci = block_bootstrap_mean_ci(local_exponents, seed=config.seed + int(1000 * horizon), draws=500)
+                running = np.asarray(raw["running_exponents"], dtype=float)
+                if len(running) >= 4:
+                    tail = running[len(running) // 2 :]
+                    times = np.asarray(raw["running_times"], dtype=float)[len(running) // 2 :]
+                    slope = float(np.polyfit(times, tail, 1)[0])
+                else:
+                    slope = float("nan")
+                pairing = spectrum + spectrum[::-1]
+                rows.append(
+                    {
+                        "horizon": float(horizon),
+                        "largest_finite_time_lyapunov": float(spectrum[0]),
+                        "spectrum_sum": float(np.sum(spectrum)),
+                        "max_pairing_residual": float(np.max(np.abs(pairing))),
+                        "qr_orthogonality_error": float(raw["max_orthogonality_error"]),
+                        "renormalization_count": int(raw["renormalizations"]),
+                        "ci95_low": ci["ci_95"][0],
+                        "ci95_high": ci["ci_95"][1],
+                        "convergence_slope_tail": slope,
+                        "status": "ok",
+                    }
+                )
+                if started_progress:
+                    progress_update(1, {"lambda": f"{float(spectrum[0]):.3e}", "status": f"T={horizon:g}"})
+            except Exception as exc:
+                rows.append(
+                    {
+                        "horizon": float(horizon),
+                        "largest_finite_time_lyapunov": float("nan"),
+                        "spectrum_sum": float("nan"),
+                        "max_pairing_residual": float("nan"),
+                        "qr_orthogonality_error": float("nan"),
+                        "renormalization_count": 0,
+                        "ci95_low": float("nan"),
+                        "ci95_high": float("nan"),
+                        "convergence_slope_tail": float("nan"),
+                        "status": f"failed: {exc}",
+                    }
+                )
+                if started_progress:
+                    progress_update(1, {"status": f"failed T={horizon:g}"})
+    finally:
+        if started_progress:
+            progress_close()
     ok_rows = [row for row in rows if row["status"] == "ok"]
     if len(ok_rows) < 2:
         classification = "short_finite_time_only"
@@ -1077,99 +1126,116 @@ def deviation_vector_ordering_diagnostic(config: RunConfig, horizon: float) -> d
 
 def lyapunov_asymptotic_validation_analysis(config: RunConfig) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
-    for horizon in lyapunov_asymptotic_horizon_candidates(config):
-        local_config = replace(config, lyapunov_time=float(horizon))
-        try:
-            raw, _mass = qr_lyapunov_raw(local_config)
-            spectrum = np.asarray(raw["final_spectrum"], dtype=float)
-            local_exponents = np.asarray(raw["segment_log_growths"], dtype=float) / max(float(raw["renorm_time"]), DIST_FLOOR)
-            ci = block_bootstrap_mean_ci(local_exponents, seed=config.seed + int(1733 * horizon), draws=500)
-            running = np.asarray(raw["running_exponents"], dtype=float)
-            times = np.asarray(raw["running_times"], dtype=float)
-            if len(running) >= 5:
-                start = len(running) // 2
-                slope = regression_slope_summary(times[start:], running[start:])
-            else:
-                slope = regression_slope_summary(times, running)
-            pairing_full = lyapunov_pairing_summary(spectrum, mode="full")
-            pairing_neutral = lyapunov_pairing_summary(spectrum, mode="neutral_excluded")
-            pairing_configured = lyapunov_pairing_summary(spectrum, mode=config.lyapunov_pairing_mode)
-            dynamics = asymptotic_horizon_dynamics(config, float(horizon))
-            row = {
-                "horizon": float(horizon),
-                "largest_finite_time_lyapunov": float(spectrum[0]),
-                "full_spectrum_json": json.dumps([float(value) for value in spectrum]),
-                "spectrum_sum": float(np.sum(spectrum)),
-                "max_pairing_residual": float(pairing_full["full_max_abs_residual"]),
-                "mean_pairing_residual": float(pairing_full["full_mean_abs_residual"]),
-                "rms_pairing_residual": float(pairing_full["full_rms_abs_residual"]),
-                "raw_pairing_residual": float(pairing_full["full_max_abs_residual"]),
-                "raw_pairing_mean_residual": float(pairing_full["full_mean_abs_residual"]),
-                "raw_pairing_rms_residual": float(pairing_full["full_rms_abs_residual"]),
-                "neutral_excluded_pairing_residual": float(pairing_neutral["max_abs_residual"]),
-                "neutral_excluded_pairing_mean_residual": float(pairing_neutral["mean_abs_residual"]),
-                "neutral_excluded_pairing_rms_residual": float(pairing_neutral["rms_abs_residual"]),
-                "configured_pairing_mode": config.lyapunov_pairing_mode,
-                "configured_max_pairing_residual": float(pairing_configured["max_abs_residual"]),
-                "configured_mean_pairing_residual": float(pairing_configured["mean_abs_residual"]),
-                "configured_rms_pairing_residual": float(pairing_configured["rms_abs_residual"]),
-                "pairing_pair_table_json": json.dumps(pairing_full["pair_rows"]),
-                "qr_orthogonality_error": float(raw["max_orthogonality_error"]),
-                "tangent_condition_number": float(raw["max_condition_number"]),
-                "renormalization_count": int(raw["renormalizations"]),
-                "ci95_low": ci["ci_95"][0],
-                "ci95_high": ci["ci_95"][1],
-                "tail_slope": float(slope["slope"]),
-                "tail_slope_se": float(slope["slope_se"]),
-                "tail_slope_ci95_low": float(slope["slope_ci95_low"]),
-                "tail_slope_ci95_high": float(slope["slope_ci95_high"]),
-                "tail_slope_consistent_with_zero": bool(slope["statistically_consistent_with_zero"]),
-                "status": "ok",
-                **dynamics,
-            }
-            rows.append(row)
-        except Exception as exc:
-            rows.append(
-                {
+    horizons = lyapunov_asymptotic_horizon_candidates(config)
+    started_progress = False
+    if not progress_active():
+        progress_start(
+            len(horizons),
+            "Asymptotic validation sweep",
+            {"ic": config.ic_mode, "backend": "scipy", "integrator": "DOP853", "lambda": "--"},
+        )
+        started_progress = True
+    try:
+        for horizon in horizons:
+            local_config = replace(config, lyapunov_time=float(horizon))
+            try:
+                raw, _mass = qr_lyapunov_raw(local_config)
+                spectrum = np.asarray(raw["final_spectrum"], dtype=float)
+                local_exponents = np.asarray(raw["segment_log_growths"], dtype=float) / max(float(raw["renorm_time"]), DIST_FLOOR)
+                ci = block_bootstrap_mean_ci(local_exponents, seed=config.seed + int(1733 * horizon), draws=500)
+                running = np.asarray(raw["running_exponents"], dtype=float)
+                times = np.asarray(raw["running_times"], dtype=float)
+                if len(running) >= 5:
+                    start = len(running) // 2
+                    slope = regression_slope_summary(times[start:], running[start:])
+                else:
+                    slope = regression_slope_summary(times, running)
+                pairing_full = lyapunov_pairing_summary(spectrum, mode="full")
+                pairing_neutral = lyapunov_pairing_summary(spectrum, mode="neutral_excluded")
+                pairing_configured = lyapunov_pairing_summary(spectrum, mode=config.lyapunov_pairing_mode)
+                dynamics = asymptotic_horizon_dynamics(config, float(horizon))
+                row = {
                     "horizon": float(horizon),
-                    "largest_finite_time_lyapunov": float("nan"),
-                    "full_spectrum_json": "[]",
-                    "spectrum_sum": float("nan"),
-                    "max_pairing_residual": float("nan"),
-                    "mean_pairing_residual": float("nan"),
-                    "rms_pairing_residual": float("nan"),
-                    "raw_pairing_residual": float("nan"),
-                    "raw_pairing_mean_residual": float("nan"),
-                    "raw_pairing_rms_residual": float("nan"),
-                    "neutral_excluded_pairing_residual": float("nan"),
-                    "neutral_excluded_pairing_mean_residual": float("nan"),
-                    "neutral_excluded_pairing_rms_residual": float("nan"),
+                    "largest_finite_time_lyapunov": float(spectrum[0]),
+                    "full_spectrum_json": json.dumps([float(value) for value in spectrum]),
+                    "spectrum_sum": float(np.sum(spectrum)),
+                    "max_pairing_residual": float(pairing_full["full_max_abs_residual"]),
+                    "mean_pairing_residual": float(pairing_full["full_mean_abs_residual"]),
+                    "rms_pairing_residual": float(pairing_full["full_rms_abs_residual"]),
+                    "raw_pairing_residual": float(pairing_full["full_max_abs_residual"]),
+                    "raw_pairing_mean_residual": float(pairing_full["full_mean_abs_residual"]),
+                    "raw_pairing_rms_residual": float(pairing_full["full_rms_abs_residual"]),
+                    "neutral_excluded_pairing_residual": float(pairing_neutral["max_abs_residual"]),
+                    "neutral_excluded_pairing_mean_residual": float(pairing_neutral["mean_abs_residual"]),
+                    "neutral_excluded_pairing_rms_residual": float(pairing_neutral["rms_abs_residual"]),
                     "configured_pairing_mode": config.lyapunov_pairing_mode,
-                    "configured_max_pairing_residual": float("nan"),
-                    "configured_mean_pairing_residual": float("nan"),
-                    "configured_rms_pairing_residual": float("nan"),
-                    "pairing_pair_table_json": "[]",
-                    "qr_orthogonality_error": float("nan"),
-                    "tangent_condition_number": float("nan"),
-                    "renormalization_count": 0,
-                    "ci95_low": float("nan"),
-                    "ci95_high": float("nan"),
-                    "tail_slope": float("nan"),
-                    "tail_slope_se": float("nan"),
-                    "tail_slope_ci95_low": float("nan"),
-                    "tail_slope_ci95_high": float("nan"),
-                    "tail_slope_consistent_with_zero": False,
-                    "max_abs_relative_energy_error": float("nan"),
-                    "max_relative_angular_momentum_drift": float("nan"),
-                    "closest_encounter_distance": float("nan"),
-                    "max_barycentric_radius": float("nan"),
-                    "outcome_label": "failed",
-                    "time_to_escape": float("nan"),
-                    "time_to_collision": float("nan"),
-                    "dynamics_status": "failed",
-                    "status": f"failed: {exc}",
+                    "configured_max_pairing_residual": float(pairing_configured["max_abs_residual"]),
+                    "configured_mean_pairing_residual": float(pairing_configured["mean_abs_residual"]),
+                    "configured_rms_pairing_residual": float(pairing_configured["rms_abs_residual"]),
+                    "pairing_pair_table_json": json.dumps(pairing_full["pair_rows"]),
+                    "qr_orthogonality_error": float(raw["max_orthogonality_error"]),
+                    "tangent_condition_number": float(raw["max_condition_number"]),
+                    "renormalization_count": int(raw["renormalizations"]),
+                    "ci95_low": ci["ci_95"][0],
+                    "ci95_high": ci["ci_95"][1],
+                    "tail_slope": float(slope["slope"]),
+                    "tail_slope_se": float(slope["slope_se"]),
+                    "tail_slope_ci95_low": float(slope["slope_ci95_low"]),
+                    "tail_slope_ci95_high": float(slope["slope_ci95_high"]),
+                    "tail_slope_consistent_with_zero": bool(slope["statistically_consistent_with_zero"]),
+                    "status": "ok",
+                    **dynamics,
                 }
-            )
+                rows.append(row)
+                if started_progress:
+                    progress_update(1, {"lambda": f"{float(spectrum[0]):.3e}", "status": f"T={horizon:g}"})
+            except Exception as exc:
+                rows.append(
+                    {
+                        "horizon": float(horizon),
+                        "largest_finite_time_lyapunov": float("nan"),
+                        "full_spectrum_json": "[]",
+                        "spectrum_sum": float("nan"),
+                        "max_pairing_residual": float("nan"),
+                        "mean_pairing_residual": float("nan"),
+                        "rms_pairing_residual": float("nan"),
+                        "raw_pairing_residual": float("nan"),
+                        "raw_pairing_mean_residual": float("nan"),
+                        "raw_pairing_rms_residual": float("nan"),
+                        "neutral_excluded_pairing_residual": float("nan"),
+                        "neutral_excluded_pairing_mean_residual": float("nan"),
+                        "neutral_excluded_pairing_rms_residual": float("nan"),
+                        "configured_pairing_mode": config.lyapunov_pairing_mode,
+                        "configured_max_pairing_residual": float("nan"),
+                        "configured_mean_pairing_residual": float("nan"),
+                        "configured_rms_pairing_residual": float("nan"),
+                        "pairing_pair_table_json": "[]",
+                        "qr_orthogonality_error": float("nan"),
+                        "tangent_condition_number": float("nan"),
+                        "renormalization_count": 0,
+                        "ci95_low": float("nan"),
+                        "ci95_high": float("nan"),
+                        "tail_slope": float("nan"),
+                        "tail_slope_se": float("nan"),
+                        "tail_slope_ci95_low": float("nan"),
+                        "tail_slope_ci95_high": float("nan"),
+                        "tail_slope_consistent_with_zero": False,
+                        "max_abs_relative_energy_error": float("nan"),
+                        "max_relative_angular_momentum_drift": float("nan"),
+                        "closest_encounter_distance": float("nan"),
+                        "max_barycentric_radius": float("nan"),
+                        "outcome_label": "failed",
+                        "time_to_escape": float("nan"),
+                        "time_to_collision": float("nan"),
+                        "dynamics_status": "failed",
+                        "status": f"failed: {exc}",
+                    }
+                )
+                if started_progress:
+                    progress_update(1, {"status": f"failed T={horizon:g}"})
+    finally:
+        if started_progress:
+            progress_close()
 
     ok_rows = [row for row in rows if row.get("status") == "ok"]
     final_horizon = float(ok_rows[-1]["horizon"]) if ok_rows else float("nan")

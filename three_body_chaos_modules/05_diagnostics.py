@@ -1,5 +1,5 @@
-﻿# Auto-split implementation module for 3BS-Simulator.py.
-# Generated from the original monolithic simulator to keep the CLI stable while making the codebase navigable.
+# Auto-split implementation module for 3BS-Simulator.py.
+# Generated from codexpy.py so the public GitHub simulator tracks the local monolithic research engine.
 
 # =========================
 # DIAGNOSTICS
@@ -75,6 +75,38 @@ def divergence_summary(reference: Trajectory, perturbed: Trajectory) -> dict[str
     }
 
 
+def trajectory_metric_uncertainty(reference: Trajectory, perturbed: Trajectory, mass: np.ndarray, seed: int) -> dict[str, Any]:
+    e0 = reference.energy[0]
+    rel_energy = np.abs((reference.energy - e0) / max(abs(e0), DIST_FLOOR))
+    angular = np.array([angular_momentum(p, v, mass) for p, v in zip(reference.pos, reference.vel)])
+    angular_drift = np.linalg.norm(angular - angular[0], axis=1)
+    closest = closest_encounter_series(reference.pos)
+    sep = np.sqrt(
+        np.sum((reference.pos - perturbed.pos) ** 2, axis=(1, 2))
+        + np.sum((reference.vel - perturbed.vel) ** 2, axis=(1, 2))
+    )
+    metrics = {
+        "relative_energy_error": rel_energy,
+        "angular_momentum_vector_drift": angular_drift,
+        "closest_encounter_distance": closest,
+        "phase_space_separation": sep,
+    }
+    rows: dict[str, Any] = {}
+    for index, (name, values) in enumerate(metrics.items()):
+        rows[name] = {
+            "bootstrap_ci_95": bootstrap_mean_ci(values, seed=seed + 31 * index, draws=500),
+            "jackknife": jackknife_mean_ci(values),
+            "mean": float(np.mean(values)),
+            "median": float(np.median(values)),
+            "max": float(np.max(values)),
+        }
+    return {
+        "method": "bootstrap_and_delete_one_jackknife_over_sampled_time_series",
+        "metrics": rows,
+        "claim_scope": "uncertainty summaries for sampled diagnostic time series; autocorrelation means these are descriptive, not formal IID confidence intervals",
+    }
+
+
 def state_norm(state: np.ndarray) -> float:
     return float(max(np.linalg.norm(state), DIST_FLOOR))
 
@@ -133,6 +165,34 @@ def bootstrap_mean_ci(values: np.ndarray | list[float], seed: int, draws: int = 
     samples = rng.choice(values_np, size=(draws, len(values_np)), replace=True)
     means = np.mean(samples, axis=1)
     return [float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))]
+
+
+def jackknife_mean_ci(values: np.ndarray | list[float]) -> dict[str, Any]:
+    values_np = np.asarray(values, dtype=float)
+    values_np = values_np[np.isfinite(values_np)]
+    n = len(values_np)
+    if n < 3:
+        return {
+            "method": "delete_one_jackknife_mean",
+            "n": int(n),
+            "mean": float(np.mean(values_np)) if n else float("nan"),
+            "standard_error": float("nan"),
+            "ci_95": [float("nan"), float("nan")],
+            "status": "insufficient_data",
+        }
+    leave_one = np.array([(np.sum(values_np) - values_np[i]) / (n - 1) for i in range(n)], dtype=float)
+    theta_bar = float(np.mean(leave_one))
+    se = math.sqrt((n - 1) * float(np.mean((leave_one - theta_bar) ** 2)))
+    mean = float(np.mean(values_np))
+    return {
+        "method": "delete_one_jackknife_mean",
+        "n": int(n),
+        "mean": mean,
+        "standard_error": float(se),
+        "ci_95": [float(mean - 1.96 * se), float(mean + 1.96 * se)],
+        "status": "ok",
+        "claim_scope": "uncertainty estimate for finite samples; not an IID proof unless the data-generating process supports IID assumptions",
+    }
 
 
 def integrated_autocorrelation_time(values: np.ndarray | list[float]) -> float:
@@ -251,22 +311,35 @@ def convergence_study(config: RunConfig) -> list[dict[str, float]]:
     reference_states = integrate_states(initial_state, mass, t_eval, reference_config)
     reference_final = reference_states[-1]
     rows = []
-    for scale in (100.0, 10.0, 1.0):
-        cfg = replace(config, backend="scipy", rtol=config.rtol * scale, atol=config.atol * scale)
-        states = integrate_states(initial_state, mass, t_eval, cfg)
-        pos_series = states[:, : N_BODIES * DIM].reshape(-1, N_BODIES, DIM)
-        vel_series = states[:, N_BODIES * DIM :].reshape(-1, N_BODIES, DIM)
-        energy = np.array([compute_energy(p, v, mass, cfg.softening) for p, v in zip(pos_series, vel_series)])
-        rel_energy = (energy - energy[0]) / abs(energy[0])
-        rows.append(
-            {
-                "rtol": float(cfg.rtol),
-                "atol": float(cfg.atol),
-                "duration": float(duration),
-                "final_state_relative_error": float(np.linalg.norm(states[-1] - reference_final) / state_norm(reference_final)),
-                "max_relative_energy_error": float(np.max(np.abs(rel_energy))),
-            }
-        )
+    scales = (100.0, 10.0, 1.0)
+    started_progress = False
+    if not progress_active():
+        progress_start(len(scales), "Tolerance convergence", {"ic": config.ic_mode, "backend": "scipy", "integrator": "DOP853"})
+        started_progress = True
+    try:
+        for scale in scales:
+            cfg = replace(config, backend="scipy", rtol=config.rtol * scale, atol=config.atol * scale)
+            states = integrate_states(initial_state, mass, t_eval, cfg)
+            pos_series = states[:, : N_BODIES * DIM].reshape(-1, N_BODIES, DIM)
+            vel_series = states[:, N_BODIES * DIM :].reshape(-1, N_BODIES, DIM)
+            energy = np.array([compute_energy(p, v, mass, cfg.softening) for p, v in zip(pos_series, vel_series)])
+            rel_energy = (energy - energy[0]) / abs(energy[0])
+            final_error = float(np.linalg.norm(states[-1] - reference_final) / state_norm(reference_final))
+            max_energy = float(np.max(np.abs(rel_energy)))
+            rows.append(
+                {
+                    "rtol": float(cfg.rtol),
+                    "atol": float(cfg.atol),
+                    "duration": float(duration),
+                    "final_state_relative_error": final_error,
+                    "max_relative_energy_error": max_energy,
+                }
+            )
+            if started_progress:
+                progress_update(1, {"energy": f"{max_energy:.3e}", "status": f"rtol={cfg.rtol:.1e}"})
+    finally:
+        if started_progress:
+            progress_close()
     return rows
 
 
@@ -537,71 +610,85 @@ def parameter_sweep_analysis(config: RunConfig) -> dict[str, Any]:
     design = latin_hypercube_unit(samples, 6, config.seed + 1701)
     duration = min(config.duration, max(config.diagnostic_duration, 0.5))
     rows: list[dict[str, Any]] = []
-    for index, row in enumerate(design):
-        mass_ratio = 1.0 + 9.0 * row[0]
-        hierarchy_ratio = 3.0 + 17.0 * row[1]
-        eccentricity = min(0.95, config.eccentricity_min + row[2] * max(config.eccentricity_max - config.eccentricity_min, 0.1))
-        inclination = row[3] * max(config.inclination_max, 0.15)
-        velocity_scale = 0.65 + 0.85 * row[4]
-        perturbation_scale = config.perturbation * 10.0 ** (-1.0 + 2.0 * row[5])
-        mode = "hierarchical_triple" if index % 2 == 0 else "random_chaotic"
-        local_config = replace(
-            config,
-            backend="scipy",
-            ic_mode=mode,
-            seed=config.seed + 2000 + index,
-            position_scale=max(config.position_scale * hierarchy_ratio / 6.0, config.min_separation * 4.0),
-            velocity_scale=velocity_scale,
-            mass_min=1.0,
-            mass_max=mass_ratio,
-            eccentricity_min=max(0.0, eccentricity - 0.05),
-            eccentricity_max=min(0.98, eccentricity + 0.05),
-            inclination_max=inclination,
-            perturbation=perturbation_scale,
-        )
-        try:
-            ic = generate_initial_condition(local_config)
-            t_eval = np.linspace(0.0, duration, min(max(config.samples // 10, 80), 180))
-            states = integrate_states(ic.state, ic.mass, t_eval, local_config)
-            traj = states_to_trajectory(t_eval, states, ic.mass, local_config.softening)
-            summary = summarize_trajectory(traj, ic.mass)
-            shadow = ic.state + perturbation_vector(ic.mass, perturbation_scale, local_config.seed + 71)
-            shadow_final = integrate_to_time(shadow, ic.mass, duration, local_config)
-            separation = state_norm(shadow_final - states[-1])
-            rows.append(
-                {
-                    "sample": index,
-                    "status": "ok",
-                    "ic_mode": mode,
-                    "estimated_class": ic.classification.get("estimated_class", "unknown"),
-                    "mass_ratio": float(mass_ratio),
-                    "hierarchy_ratio_proxy": float(hierarchy_ratio),
-                    "eccentricity": float(eccentricity),
-                    "inclination": float(inclination),
-                    "velocity_scale": float(velocity_scale),
-                    "perturbation": float(perturbation_scale),
-                    "max_relative_energy_error": summary["max_abs_relative_energy_error"],
-                    "max_angular_momentum_vector_drift": summary["max_angular_momentum_vector_drift"],
-                    "closest_encounter_distance": summary["closest_encounter_distance"],
-                    "max_barycentric_radius": summary["max_barycentric_radius"],
-                    "finite_amplitude_ftle": float(math.log(separation / perturbation_scale) / duration),
-                }
+    started_progress = False
+    if not progress_active():
+        progress_start(samples, "Parameter sweep", {"ic": config.ic_mode, "backend": "scipy", "integrator": "DOP853"})
+        started_progress = True
+    try:
+        iterator = enumerate(design)
+        for index, row in iterator:
+            mass_ratio = 1.0 + 9.0 * row[0]
+            hierarchy_ratio = 3.0 + 17.0 * row[1]
+            eccentricity = min(0.95, config.eccentricity_min + row[2] * max(config.eccentricity_max - config.eccentricity_min, 0.1))
+            inclination = row[3] * max(config.inclination_max, 0.15)
+            velocity_scale = 0.65 + 0.85 * row[4]
+            perturbation_scale = config.perturbation * 10.0 ** (-1.0 + 2.0 * row[5])
+            mode = "hierarchical_triple" if index % 2 == 0 else "random_chaotic"
+            local_config = replace(
+                config,
+                backend="scipy",
+                ic_mode=mode,
+                seed=config.seed + 2000 + index,
+                position_scale=max(config.position_scale * hierarchy_ratio / 6.0, config.min_separation * 4.0),
+                velocity_scale=velocity_scale,
+                mass_min=1.0,
+                mass_max=mass_ratio,
+                eccentricity_min=max(0.0, eccentricity - 0.05),
+                eccentricity_max=min(0.98, eccentricity + 0.05),
+                inclination_max=inclination,
+                perturbation=perturbation_scale,
             )
-        except Exception as exc:
-            rows.append(
-                {
-                    "sample": index,
-                    "status": "failed",
-                    "ic_mode": mode,
-                    "mass_ratio": float(mass_ratio),
-                    "hierarchy_ratio_proxy": float(hierarchy_ratio),
-                    "eccentricity": float(eccentricity),
-                    "inclination": float(inclination),
-                    "velocity_scale": float(velocity_scale),
-                    "perturbation": float(perturbation_scale),
-                    "reason": str(exc),
-                }
-            )
+            try:
+                ic = generate_initial_condition(local_config)
+                t_eval = np.linspace(0.0, duration, min(max(config.samples // 10, 80), 180))
+                states = integrate_states(ic.state, ic.mass, t_eval, local_config)
+                traj = states_to_trajectory(t_eval, states, ic.mass, local_config.softening)
+                summary = summarize_trajectory(traj, ic.mass)
+                shadow = ic.state + perturbation_vector(ic.mass, perturbation_scale, local_config.seed + 71)
+                shadow_final = integrate_to_time(shadow, ic.mass, duration, local_config)
+                separation = state_norm(shadow_final - states[-1])
+                ftle_value = float(math.log(separation / perturbation_scale) / duration)
+                rows.append(
+                    {
+                        "sample": index,
+                        "status": "ok",
+                        "ic_mode": mode,
+                        "estimated_class": ic.classification.get("estimated_class", "unknown"),
+                        "mass_ratio": float(mass_ratio),
+                        "hierarchy_ratio_proxy": float(hierarchy_ratio),
+                        "eccentricity": float(eccentricity),
+                        "inclination": float(inclination),
+                        "velocity_scale": float(velocity_scale),
+                        "perturbation": float(perturbation_scale),
+                        "max_relative_energy_error": summary["max_abs_relative_energy_error"],
+                        "max_angular_momentum_vector_drift": summary["max_angular_momentum_vector_drift"],
+                        "closest_encounter_distance": summary["closest_encounter_distance"],
+                        "max_barycentric_radius": summary["max_barycentric_radius"],
+                        "finite_amplitude_ftle": ftle_value,
+                    }
+                )
+                if started_progress:
+                    progress_update(1, {"mode": mode, "lambda": f"{ftle_value:.3e}", "energy": f"{summary['max_abs_relative_energy_error']:.3e}"})
+            except Exception as exc:
+                rows.append(
+                    {
+                        "sample": index,
+                        "status": "failed",
+                        "ic_mode": mode,
+                        "mass_ratio": float(mass_ratio),
+                        "hierarchy_ratio_proxy": float(hierarchy_ratio),
+                        "eccentricity": float(eccentricity),
+                        "inclination": float(inclination),
+                        "velocity_scale": float(velocity_scale),
+                        "perturbation": float(perturbation_scale),
+                        "reason": str(exc),
+                    }
+                )
+                if started_progress:
+                    progress_update(1, {"mode": mode, "status": "failed"})
+    finally:
+        if started_progress:
+            progress_close()
 
     successful = [row for row in rows if row.get("status") == "ok"]
     correlations: dict[str, dict[str, float]] = {}
@@ -983,6 +1070,8 @@ def reference_benchmark_suite(config: RunConfig) -> dict[str, Any]:
 def cross_integrator_benchmark(config: RunConfig, ic: InitialCondition) -> dict[str, Any]:
     duration = min(config.duration, max(config.diagnostic_duration, 0.5))
     t_eval = np.linspace(0.0, duration, min(max(config.samples // 8, 80), 240))
+    shadow_scale = max(config.perturbation, 1e-12 * state_norm(ic.state))
+    shadow_state = ic.state + perturbation_vector(ic.mass, shadow_scale, config.seed + 6061)
     reference_config = replace(
         solver_config_for_initial_condition(config, ic),
         backend="scipy",
@@ -991,7 +1080,29 @@ def cross_integrator_benchmark(config: RunConfig, ic: InitialCondition) -> dict[
     )
     started = time.perf_counter()
     reference_states = integrate_states(ic.state, ic.mass, t_eval, reference_config)
+    reference_shadow_states = integrate_states(shadow_state, ic.mass, t_eval, reference_config)
     reference_runtime = time.perf_counter() - started
+    reference_outcome = classify_basin_trajectory(reference_states, t_eval, ic.mass, reference_config)
+    reference_final_shadow_sep = state_norm(reference_shadow_states[-1] - reference_states[-1])
+    reference_ftle_proxy = float(math.log(reference_final_shadow_sep / shadow_scale) / max(duration, DIST_FLOOR))
+    short_qr_reference: LyapunovResult | None = None
+    short_qr_default: LyapunovResult | None = None
+    qr_scope_note = (
+        "Full QR Lyapunov spectrum agreement is computed only for SciPy DOP853 tolerance replays. "
+        "REBOUND rows report finite-amplitude FTLE proxy agreement because REBOUND variational equations are not used here."
+    )
+    try:
+        short_lyap_time = max(reference_config.renorm_time, min(duration, config.lyapunov_time, 8.0 * config.renorm_time))
+        short_qr_reference, _ = lyapunov_benettin(
+            replace(reference_config, lyapunov_time=short_lyap_time, renorm_time=min(config.renorm_time, short_lyap_time)),
+            initial_condition=ic,
+        )
+        short_qr_default, _ = lyapunov_benettin(
+            replace(solver_config_for_initial_condition(config, ic), backend="scipy", lyapunov_time=short_lyap_time, renorm_time=min(config.renorm_time, short_lyap_time)),
+            initial_condition=ic,
+        )
+    except Exception as exc:
+        qr_scope_note += f" Short QR replay failed: {exc}"
     rows: list[dict[str, Any]] = [
         {
             "integrator": "scipy_dop853_tighter_reference",
@@ -1000,6 +1111,13 @@ def cross_integrator_benchmark(config: RunConfig, ic: InitialCondition) -> dict[
             "final_state_relative_error": 0.0,
             "max_relative_energy_error": trajectory_energy_drift(reference_states, ic.mass, reference_config.softening),
             "max_angular_momentum_vector_drift": trajectory_angular_momentum_drift(reference_states, ic.mass),
+            "outcome_label": reference_outcome.get("outcome_label", "unknown"),
+            "outcome_agrees_with_reference": True,
+            "finite_amplitude_ftle_proxy": reference_ftle_proxy,
+            "finite_amplitude_ftle_proxy_delta_vs_reference": 0.0,
+            "qr_lambda_max_short": float(short_qr_reference.exponent) if short_qr_reference else float("nan"),
+            "qr_spectrum_inf_delta_vs_reference": 0.0 if short_qr_reference else float("nan"),
+            "lyapunov_agreement_scope": qr_scope_note,
         }
     ]
 
@@ -1021,34 +1139,77 @@ def cross_integrator_benchmark(config: RunConfig, ic: InitialCondition) -> dict[
                 )
             )
 
-    for name, candidate_config in candidates:
-        started = time.perf_counter()
-        try:
-            states = integrate_states(ic.state, ic.mass, t_eval, candidate_config)
-            runtime = time.perf_counter() - started
-            final_error = float(np.linalg.norm(states[-1] - reference_states[-1]) / state_norm(reference_states[-1]))
-            energy_drift = trajectory_energy_drift(states, ic.mass, candidate_config.softening)
-            angular_drift = trajectory_angular_momentum_drift(states, ic.mass)
-            combined_error = max(final_error, energy_drift, angular_drift)
-            rows.append(
-                {
-                    "integrator": name,
-                    "status": benchmark_status(combined_error, 1e-7, 1e-5),
-                    "runtime_seconds": float(runtime),
-                    "final_state_relative_error_vs_dop853_reference": final_error,
-                    "max_relative_energy_error": energy_drift,
-                    "max_angular_momentum_vector_drift": angular_drift,
-                }
-            )
-        except Exception as exc:
-            rows.append(
-                {
-                    "integrator": name,
-                    "status": "skipped" if "WHFast is restricted" in str(exc) else "failed",
-                    "runtime_seconds": float(time.perf_counter() - started),
-                    "reason": str(exc),
-                }
-            )
+    started_progress = False
+    if not progress_active():
+        progress_start(
+            len(candidates),
+            "Cross-integrator benchmark",
+            {"ic": config.ic_mode, "backend": "multi", "integrator": "DOP853/REBOUND"},
+        )
+        started_progress = True
+    try:
+        for name, candidate_config in candidates:
+            started = time.perf_counter()
+            try:
+                states = integrate_states(ic.state, ic.mass, t_eval, candidate_config)
+                shadow_states = integrate_states(shadow_state, ic.mass, t_eval, candidate_config)
+                runtime = time.perf_counter() - started
+                final_error = float(np.linalg.norm(states[-1] - reference_states[-1]) / state_norm(reference_states[-1]))
+                energy_drift = trajectory_energy_drift(states, ic.mass, candidate_config.softening)
+                angular_drift = trajectory_angular_momentum_drift(states, ic.mass)
+                outcome = classify_basin_trajectory(states, t_eval, ic.mass, candidate_config)
+                outcome_agrees = str(outcome.get("outcome_label", "unknown")) == str(reference_outcome.get("outcome_label", "unknown"))
+                shadow_sep = state_norm(shadow_states[-1] - states[-1])
+                ftle_proxy = float(math.log(shadow_sep / shadow_scale) / max(duration, DIST_FLOOR))
+                ftle_proxy_delta = abs(ftle_proxy - reference_ftle_proxy)
+                qr_lambda = float("nan")
+                qr_spectrum_delta = float("nan")
+                if name == "scipy_dop853_default" and short_qr_reference is not None and short_qr_default is not None:
+                    qr_lambda = float(short_qr_default.exponent)
+                    qr_spectrum_delta = float(
+                        np.linalg.norm(np.asarray(short_qr_default.spectrum) - np.asarray(short_qr_reference.spectrum), ord=np.inf)
+                    )
+                invariant_error = max(final_error, energy_drift, angular_drift)
+                if outcome_agrees and invariant_error <= 1e-7 and ftle_proxy_delta <= 0.05:
+                    status = "passed"
+                elif outcome_agrees and invariant_error <= 1e-5 and ftle_proxy_delta <= 0.25:
+                    status = "warning"
+                else:
+                    status = "failed"
+                rows.append(
+                    {
+                        "integrator": name,
+                        "status": status,
+                        "runtime_seconds": float(runtime),
+                        "final_state_relative_error_vs_dop853_reference": final_error,
+                        "max_relative_energy_error": energy_drift,
+                        "max_angular_momentum_vector_drift": angular_drift,
+                        "combined_invariant_error": float(invariant_error),
+                        "outcome_label": outcome.get("outcome_label", "unknown"),
+                        "outcome_agrees_with_reference": bool(outcome_agrees),
+                        "finite_amplitude_ftle_proxy": ftle_proxy,
+                        "finite_amplitude_ftle_proxy_delta_vs_reference": float(ftle_proxy_delta),
+                        "qr_lambda_max_short": qr_lambda,
+                        "qr_spectrum_inf_delta_vs_reference": qr_spectrum_delta,
+                        "lyapunov_agreement_scope": qr_scope_note,
+                    }
+                )
+                if started_progress:
+                    progress_update(1, {"integrator": name, "energy": f"{energy_drift:.3e}", "status": status})
+            except Exception as exc:
+                rows.append(
+                    {
+                        "integrator": name,
+                        "status": "skipped" if "WHFast is restricted" in str(exc) else "failed",
+                        "runtime_seconds": float(time.perf_counter() - started),
+                        "reason": str(exc),
+                    }
+                )
+                if started_progress:
+                    progress_update(1, {"integrator": name, "status": "failed"})
+    finally:
+        if started_progress:
+            progress_close()
 
     statuses = [str(row.get("status", "failed")) for row in rows if row.get("status") != "reference"]
     if statuses and all(status in {"passed", "skipped"} for status in statuses):
@@ -1062,9 +1223,74 @@ def cross_integrator_benchmark(config: RunConfig, ic: InitialCondition) -> dict[
         "duration": float(duration),
         "samples": int(len(t_eval)),
         "reference": "SciPy DOP853 with tightened tolerances",
+        "reference_outcome_label": reference_outcome.get("outcome_label", "unknown"),
+        "reference_finite_amplitude_ftle_proxy": reference_ftle_proxy,
+        "qr_reference_lambda_max_short": float(short_qr_reference.exponent) if short_qr_reference else float("nan"),
+        "qr_reference_spectrum_short": short_qr_reference.spectrum if short_qr_reference else [],
+        "lyapunov_agreement_scope": qr_scope_note,
         "overall_status": overall,
         "rows": rows,
+        "claim_policy": "Cross-integrator agreement is numerical validation only. It does not prove physical chaos, asymptotic Lyapunov behavior, or exact regime boundaries.",
     }
+
+
+def write_cross_integrator_benchmark_outputs(out: Path, benchmark: dict[str, Any]) -> None:
+    rows = list(benchmark.get("rows", []))
+    if not rows:
+        return
+    columns = [
+        "integrator",
+        "status",
+        "runtime_seconds",
+        "final_state_relative_error_vs_dop853_reference",
+        "max_relative_energy_error",
+        "max_angular_momentum_vector_drift",
+        "combined_invariant_error",
+        "outcome_label",
+        "outcome_agrees_with_reference",
+        "finite_amplitude_ftle_proxy",
+        "finite_amplitude_ftle_proxy_delta_vs_reference",
+        "qr_lambda_max_short",
+        "qr_spectrum_inf_delta_vs_reference",
+        "reason",
+    ]
+    with (out / "cross_integrator_benchmark.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+    lines = [
+        "# Cross-Integrator Benchmark",
+        "",
+        f"- Overall status: {benchmark.get('overall_status', 'unknown')}",
+        f"- Duration: {float(benchmark.get('duration', float('nan'))):.6e}",
+        f"- Samples: {benchmark.get('samples', 'unknown')}",
+        f"- Reference: {benchmark.get('reference', 'unknown')}",
+        f"- Reference outcome: {benchmark.get('reference_outcome_label', 'unknown')}",
+        f"- Lyapunov scope: {benchmark.get('lyapunov_agreement_scope', '')}",
+        f"- Claim policy: {benchmark.get('claim_policy', '')}",
+        "",
+        "| Integrator | Status | Final error | Energy drift | Angular drift | Outcome | FTLE proxy delta | QR spectrum delta |",
+        "|---|---|---:|---:|---:|---|---:|---:|",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row.get("integrator", "")),
+                    str(row.get("status", "")),
+                    f"{float(row.get('final_state_relative_error_vs_dop853_reference', row.get('final_state_relative_error', float('nan')))):.3e}",
+                    f"{float(row.get('max_relative_energy_error', float('nan'))):.3e}",
+                    f"{float(row.get('max_angular_momentum_vector_drift', float('nan'))):.3e}",
+                    str(row.get("outcome_label", "")),
+                    f"{float(row.get('finite_amplitude_ftle_proxy_delta_vs_reference', float('nan'))):.3e}",
+                    f"{float(row.get('qr_spectrum_inf_delta_vs_reference', float('nan'))):.3e}",
+                ]
+            )
+            + " |"
+        )
+    (out / "cross_integrator_benchmark.md").write_text("\n".join(with_report_notice(lines)) + "\n", encoding="utf-8")
 
 
 def reliability_horizon_estimate(
@@ -1249,7 +1475,57 @@ def power_spectrum_data(
         "power": power.tolist(),
         "welch_frequencies": freq.tolist(),
         "welch_power": power.tolist(),
+        "multitaper": multitaper_power_spectrum(signal, dt),
     }
+
+
+def multitaper_power_spectrum(signal: np.ndarray, dt: float, time_bandwidth: float = 3.5, tapers: int = 5) -> dict[str, Any]:
+    centered = np.asarray(signal, dtype=float) - float(np.mean(signal))
+    n = len(centered)
+    if n < 16 or dt <= 0.0:
+        return {
+            "method": "multitaper_dpss",
+            "status": "insufficient_data",
+            "reason": "need at least 16 evenly sampled points and positive dt",
+        }
+    try:
+        from scipy.signal.windows import dpss
+
+        kmax = max(1, min(int(tapers), n - 1))
+        windows = dpss(n, NW=float(time_bandwidth), Kmax=kmax, sym=False)
+        spectra = []
+        for taper in np.asarray(windows):
+            tapered = centered * taper
+            fft = np.fft.rfft(tapered)
+            spectra.append((np.abs(fft) ** 2) / max(float(np.sum(taper * taper)), DIST_FLOOR))
+        freq = np.fft.rfftfreq(n, d=dt)
+        power = np.mean(np.asarray(spectra), axis=0)
+        freq = freq[1:]
+        power = power[1:]
+        total = float(np.sum(power))
+        if total <= 0.0 or len(power) == 0:
+            return {"method": "multitaper_dpss", "status": "zero_power"}
+        probability = power / total
+        entropy = -float(np.sum(probability * np.log(np.maximum(probability, DIST_FLOOR))) / math.log(max(len(probability), 2)))
+        top_idx = np.argsort(power)[-8:][::-1]
+        return {
+            "method": "multitaper_dpss",
+            "status": "ok",
+            "time_bandwidth": float(time_bandwidth),
+            "tapers": int(kmax),
+            "spectral_entropy": entropy,
+            "broadband_fraction": float(1.0 - float(np.sum(power[top_idx])) / total),
+            "top_peaks": [[float(freq[i]), float(power[i])] for i in top_idx],
+            "frequencies": freq.tolist(),
+            "power": power.tolist(),
+            "claim_scope": "auxiliary spectral robustness check; frequency-structure claims require adequate duration and resolution",
+        }
+    except Exception as exc:
+        return {
+            "method": "multitaper_dpss",
+            "status": "failed",
+            "reason": str(exc),
+        }
 
 
 def boolean_run_lengths(values: np.ndarray) -> list[int]:
@@ -1337,6 +1613,172 @@ def recurrence_data(traj: Trajectory, max_points: int) -> dict[str, Any]:
     }
 
 
+def shadowing_time_estimate(reference: Trajectory, perturbed: Trajectory, initial_scale: float) -> dict[str, Any]:
+    ref_states = np.concatenate([reference.pos.reshape(len(reference.t), -1), reference.vel.reshape(len(reference.t), -1)], axis=1)
+    per_states = np.concatenate([perturbed.pos.reshape(len(perturbed.t), -1), perturbed.vel.reshape(len(perturbed.t), -1)], axis=1)
+    separation = np.linalg.norm(ref_states - per_states, axis=1)
+    relative = separation / np.maximum(np.linalg.norm(ref_states, axis=1), DIST_FLOOR)
+    base = max(float(initial_scale), float(separation[0]), DIST_FLOOR)
+    thresholds = {
+        "10x_initial": 10.0 * base,
+        "100x_initial": 100.0 * base,
+        "relative_1e-6": 1e-6,
+        "relative_1e-4": 1e-4,
+    }
+    crossings: dict[str, float] = {}
+    for name, threshold in thresholds.items():
+        series = relative if name.startswith("relative") else separation
+        indices = np.flatnonzero(series >= threshold)
+        crossings[name] = float(reference.t[int(indices[0])]) if len(indices) else float("nan")
+    finite = [value for value in crossings.values() if np.isfinite(value)]
+    return {
+        "method": "shadow_trajectory_threshold_crossing",
+        "initial_separation": float(separation[0]),
+        "final_separation": float(separation[-1]),
+        "max_relative_separation": float(np.max(relative)),
+        "threshold_crossing_times": crossings,
+        "shadowing_time_estimate": float(min(finite)) if finite else float(reference.t[-1]),
+        "status": "threshold_crossed" if finite else "shadowed_full_sample_window",
+        "claim_scope": "finite-time numerical shadowing diagnostic; not a rigorous shadowing lemma certificate",
+    }
+
+
+def timestep_resonance_diagnostic(config: RunConfig, traj: Trajectory, spectrum: dict[str, Any]) -> dict[str, Any]:
+    sample_dt = float(np.median(np.diff(traj.t))) if len(traj.t) > 1 else float("nan")
+    candidate_dt = float(config.dt if config.dt > 0.0 else sample_dt)
+    peaks = spectrum.get("welch_top_peaks", spectrum.get("top_peaks", []))
+    rows: list[dict[str, Any]] = []
+    suspicious = False
+    for peak in peaks[:8]:
+        try:
+            frequency = float(peak[0])
+        except Exception:
+            continue
+        if not np.isfinite(frequency) or frequency <= 0.0 or not np.isfinite(candidate_dt) or candidate_dt <= 0.0:
+            continue
+        period = 1.0 / frequency
+        steps_per_period = period / candidate_dt
+        nearest_integer = round(steps_per_period)
+        integer_mismatch = abs(steps_per_period - nearest_integer)
+        near_integer = nearest_integer > 0 and integer_mismatch <= 0.02 * max(nearest_integer, 1)
+        if near_integer and nearest_integer <= 200:
+            suspicious = True
+        rows.append(
+            {
+                "frequency": frequency,
+                "period": float(period),
+                "candidate_dt": candidate_dt,
+                "steps_per_period": float(steps_per_period),
+                "nearest_integer_steps": int(nearest_integer),
+                "near_low_order_integer": bool(near_integer and nearest_integer <= 200),
+            }
+        )
+    return {
+        "method": "dominant_frequency_vs_candidate_step_ratio",
+        "status": "suspicious_low_order_ratio" if suspicious else "no_low_order_resonance_detected",
+        "sample_dt": sample_dt,
+        "candidate_dt": candidate_dt,
+        "rows": rows,
+        "claim_scope": "heuristic timestep-resonance screen; suspicious rows require reruns with changed tolerances or step caps",
+    }
+
+
+def stochastic_noise_robustness_tests(config: RunConfig, ic: InitialCondition) -> dict[str, Any]:
+    duration = min(config.duration, max(config.diagnostic_duration, config.renorm_time))
+    cfg = replace(solver_config_for_initial_condition(config, ic), backend="scipy")
+    samples = min(max(config.samples // 8, 80), 220)
+    t_eval = np.linspace(0.0, duration, samples)
+    base_states = integrate_states(ic.state, ic.mass, t_eval, cfg)
+    base_final = base_states[-1]
+    base_norm = state_norm(ic.state)
+    rows: list[dict[str, Any]] = []
+    for index, relative_scale in enumerate((1e-14, 1e-12, 1e-10, max(config.perturbation / max(base_norm, DIST_FLOOR), 1e-9))):
+        rng = np.random.default_rng(config.seed + 9001 + index)
+        absolute_scale = float(relative_scale * base_norm)
+        noise = rng.normal(size=STATE_SIZE)
+        noise = absolute_scale * noise / state_norm(noise)
+        noisy_state = ic.state + noise
+        try:
+            states = integrate_states(noisy_state, ic.mass, t_eval, cfg)
+            final_separation = state_norm(states[-1] - base_final)
+            energy_drift = trajectory_energy_drift(states, ic.mass, cfg.softening)
+            angular_drift = trajectory_angular_momentum_drift(states, ic.mass)
+            rows.append(
+                {
+                    "status": "ok",
+                    "relative_noise_scale": float(relative_scale),
+                    "absolute_noise_norm": float(state_norm(noise)),
+                    "duration": float(duration),
+                    "final_separation": float(final_separation),
+                    "finite_amplitude_ftle": float(math.log(max(final_separation, DIST_FLOOR) / max(state_norm(noise), DIST_FLOOR)) / max(duration, DIST_FLOOR)),
+                    "max_relative_energy_error": float(energy_drift),
+                    "max_angular_momentum_vector_drift": float(angular_drift),
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "status": "failed",
+                    "relative_noise_scale": float(relative_scale),
+                    "absolute_noise_norm": float(state_norm(noise)),
+                    "duration": float(duration),
+                    "reason": str(exc),
+                }
+            )
+    ftle_values = np.asarray([row.get("finite_amplitude_ftle", float("nan")) for row in rows if row.get("status") == "ok"], dtype=float)
+    finite = ftle_values[np.isfinite(ftle_values)]
+    spread = float(np.std(finite) / max(abs(float(np.mean(finite))), 1e-12)) if len(finite) >= 2 else float("nan")
+    if len(finite) < 2:
+        status = "insufficient_data"
+    elif spread <= 0.25:
+        status = "robust_within_tested_noise"
+    elif spread <= 0.75:
+        status = "noise_sensitive"
+    else:
+        status = "noise_fragile"
+    return {
+        "method": "deterministic_seeded_initial_state_noise_sweep",
+        "status": status,
+        "duration": float(duration),
+        "ftle_relative_spread": spread,
+        "rows": rows,
+        "claim_scope": "robustness screen over injected numerical-scale noise; not a stochastic physical forcing model",
+    }
+
+
+def automatic_convergence_horizon_detection(lyap: LyapunovResult) -> dict[str, Any]:
+    times = np.asarray(lyap.running_times, dtype=float)
+    values = np.asarray(lyap.running_exponents, dtype=float)
+    mask = np.isfinite(times) & np.isfinite(values)
+    times = times[mask]
+    values = values[mask]
+    if len(values) < 6:
+        return {
+            "method": "running_ftle_tail_stability",
+            "status": "insufficient_windows",
+            "claim_scope": "finite-time convergence heuristic only",
+        }
+    window = max(3, len(values) // 4)
+    tail = values[-window:]
+    tail_mean = float(np.mean(tail))
+    tail_std = float(np.std(tail))
+    relative_tail_std = tail_std / max(abs(tail_mean), 1e-12)
+    tail_drift = float(abs(tail[-1] - tail[0]) / max(abs(tail[-1]), 1e-12))
+    stabilized = relative_tail_std <= 0.08 and tail_drift <= 0.15
+    return {
+        "method": "running_ftle_tail_stability",
+        "status": "stabilized_finite_time_window" if stabilized else "not_stabilized",
+        "tail_window_count": int(window),
+        "tail_start_time": float(times[-window]),
+        "tail_end_time": float(times[-1]),
+        "tail_mean_lambda_max": tail_mean,
+        "tail_std_lambda_max": tail_std,
+        "relative_tail_std": relative_tail_std,
+        "relative_tail_drift": tail_drift,
+        "claim_scope": "automatic horizon heuristic; does not certify asymptotic Lyapunov convergence",
+    }
+
+
 def chaos_indicators(config: RunConfig) -> dict[str, Any]:
     ic = generate_initial_condition(config)
     solver_config = replace(solver_config_for_initial_condition(config, ic), backend="scipy")
@@ -1359,65 +1801,80 @@ def chaos_indicators(config: RunConfig) -> dict[str, Any]:
     solve_kwargs: dict[str, Any] = {}
     if solver_config.max_step > 0.0:
         solve_kwargs["max_step"] = solver_config.max_step
-
-    while elapsed + 0.5 * config.renorm_time <= duration:
-        augmented0 = np.concatenate([state, w1, w2, np.array([megno_integral, mean_megno_integral])])
-
-        def variational_indicator_rhs(local_t: float, augmented: np.ndarray) -> np.ndarray:
-            x = augmented[:STATE_SIZE]
-            y1 = augmented[STATE_SIZE : 2 * STATE_SIZE]
-            y2 = augmented[2 * STATE_SIZE : 3 * STATE_SIZE]
-            y_megno = float(augmented[-2])
-            flow_jac = flow_jacobian_matrix(x, mass, solver_config.softening)
-            x_dot = rhs(0.0, x, mass, solver_config.softening)
-            y1_dot = flow_jac @ y1
-            y2_dot = flow_jac @ y2
-            absolute_t = elapsed + local_t
-            denom = max(float(np.dot(y1, y1)), DIST_FLOOR)
-            stretch_rate = float(np.dot(y1_dot, y1) / denom)
-            d_megno = stretch_rate * absolute_t
-            instantaneous_megno = 0.0 if absolute_t <= DIST_FLOOR else 2.0 * y_megno / absolute_t
-            return np.concatenate(
-                [
-                    x_dot,
-                    y1_dot,
-                    y2_dot,
-                    np.array([d_megno, instantaneous_megno], dtype=np.float64),
-                ]
-            )
-
-        solution = solve_ivp(
-            variational_indicator_rhs,
-            (0.0, config.renorm_time),
-            augmented0,
-            method="DOP853",
-            rtol=solver_config.rtol,
-            atol=solver_config.atol,
-            **solve_kwargs,
+    total_windows = max(1, int(math.floor(duration / max(config.renorm_time, DIST_FLOOR) + 1e-12)))
+    started_progress = False
+    if not progress_active():
+        progress_start(
+            total_windows,
+            "MEGNO/SALI/FLI",
+            {"ic": config.ic_mode, "backend": "scipy", "integrator": "DOP853", "lambda": "--"},
         )
-        if not solution.success:
-            raise RuntimeError(f"Variational chaos indicator integration failed: {solution.message}")
+        started_progress = True
 
-        final = solution.y[:, -1]
-        state = final[:STATE_SIZE]
-        w1 = final[STATE_SIZE : 2 * STATE_SIZE]
-        w2 = final[2 * STATE_SIZE : 3 * STATE_SIZE]
-        megno_integral = float(final[-2])
-        mean_megno_integral = float(final[-1])
-        if not (np.isfinite(state).all() and np.isfinite(w1).all() and np.isfinite(w2).all()):
-            raise RuntimeError("Variational chaos indicator integration produced non-finite values.")
+    try:
+        while elapsed + 0.5 * config.renorm_time <= duration:
+            augmented0 = np.concatenate([state, w1, w2, np.array([megno_integral, mean_megno_integral])])
 
-        n1 = state_norm(w1)
-        n2 = state_norm(w2)
-        sum_log1 += math.log(n1)
-        sum_log2 += math.log(n2)
-        u1 = w1 / n1
-        u2 = w2 / n2
-        sali = float(min(np.linalg.norm(u1 + u2), np.linalg.norm(u1 - u2)))
-        w1 = u1
-        w2 = u2
-        elapsed += config.renorm_time
-        renormalizations += 1
+            def variational_indicator_rhs(local_t: float, augmented: np.ndarray) -> np.ndarray:
+                x = augmented[:STATE_SIZE]
+                y1 = augmented[STATE_SIZE : 2 * STATE_SIZE]
+                y2 = augmented[2 * STATE_SIZE : 3 * STATE_SIZE]
+                y_megno = float(augmented[-2])
+                flow_jac = flow_jacobian_matrix(x, mass, solver_config.softening)
+                x_dot = rhs(0.0, x, mass, solver_config.softening)
+                y1_dot = flow_jac @ y1
+                y2_dot = flow_jac @ y2
+                absolute_t = elapsed + local_t
+                denom = max(float(np.dot(y1, y1)), DIST_FLOOR)
+                stretch_rate = float(np.dot(y1_dot, y1) / denom)
+                d_megno = stretch_rate * absolute_t
+                instantaneous_megno = 0.0 if absolute_t <= DIST_FLOOR else 2.0 * y_megno / absolute_t
+                return np.concatenate(
+                    [
+                        x_dot,
+                        y1_dot,
+                        y2_dot,
+                        np.array([d_megno, instantaneous_megno], dtype=np.float64),
+                    ]
+                )
+
+            solution = solve_ivp(
+                variational_indicator_rhs,
+                (0.0, config.renorm_time),
+                augmented0,
+                method="DOP853",
+                rtol=solver_config.rtol,
+                atol=solver_config.atol,
+                **solve_kwargs,
+            )
+            if not solution.success:
+                raise RuntimeError(f"Variational chaos indicator integration failed: {solution.message}")
+
+            final = solution.y[:, -1]
+            state = final[:STATE_SIZE]
+            w1 = final[STATE_SIZE : 2 * STATE_SIZE]
+            w2 = final[2 * STATE_SIZE : 3 * STATE_SIZE]
+            megno_integral = float(final[-2])
+            mean_megno_integral = float(final[-1])
+            if not (np.isfinite(state).all() and np.isfinite(w1).all() and np.isfinite(w2).all()):
+                raise RuntimeError("Variational chaos indicator integration produced non-finite values.")
+
+            n1 = state_norm(w1)
+            n2 = state_norm(w2)
+            sum_log1 += math.log(n1)
+            sum_log2 += math.log(n2)
+            u1 = w1 / n1
+            u2 = w2 / n2
+            sali = float(min(np.linalg.norm(u1 + u2), np.linalg.norm(u1 - u2)))
+            w1 = u1
+            w2 = u2
+            elapsed += config.renorm_time
+            renormalizations += 1
+            if started_progress:
+                progress_update(1, {"lambda": f"{max(sum_log1, sum_log2) / max(elapsed, DIST_FLOOR):.3e}", "status": f"SALI={sali:.2e}"})
+    finally:
+        if started_progress:
+            progress_close()
 
     megno = float(2.0 * megno_integral / max(elapsed, DIST_FLOOR))
     mean_megno = float(mean_megno_integral / max(elapsed, DIST_FLOOR))
@@ -1443,14 +1900,25 @@ def ftle_field_map(config: RunConfig) -> dict[str, Any]:
     axis = np.linspace(-span, span, grid_n)
     duration = min(config.lyapunov_time, max(config.diagnostic_duration, config.renorm_time))
     values = np.empty((grid_n, grid_n), dtype=np.float64)
-    for iy, dvy in enumerate(axis):
-        for ix, dvx in enumerate(axis):
-            state, mass = state_from_velocity_offsets(config, float(dvx), float(dvy))
-            shadow = state + perturbation_vector(mass, config.perturbation, base_seed + iy * grid_n + ix)
-            final_state = integrate_to_time(state, mass, duration, config)
-            final_shadow = integrate_to_time(shadow, mass, duration, config)
-            separation = state_norm(final_shadow - final_state)
-            values[iy, ix] = math.log(separation / config.perturbation) / duration
+    started_progress = False
+    if not progress_active():
+        progress_start(grid_n * grid_n, "FTLE field grid", {"ic": config.ic_mode, "backend": config.backend, "integrator": "DOP853", "lambda": "--"})
+        started_progress = True
+    try:
+        for iy, dvy in enumerate(axis):
+            for ix, dvx in enumerate(axis):
+                state, mass = state_from_velocity_offsets(config, float(dvx), float(dvy))
+                shadow = state + perturbation_vector(mass, config.perturbation, base_seed + iy * grid_n + ix)
+                final_state = integrate_to_time(state, mass, duration, config)
+                final_shadow = integrate_to_time(shadow, mass, duration, config)
+                separation = state_norm(final_shadow - final_state)
+                value = math.log(separation / config.perturbation) / duration
+                values[iy, ix] = value
+                if started_progress:
+                    progress_update(1, {"lambda": f"{value:.3e}", "status": f"cell {iy},{ix}"})
+    finally:
+        if started_progress:
+            progress_close()
     return {
         "axis": axis.tolist(),
         "values": values.tolist(),
@@ -1600,27 +2068,37 @@ def scan_basin_grid(config: RunConfig, range_scale: float) -> dict[str, Any]:
     time_to_collision = np.full((grid_n, grid_n), np.nan, dtype=np.float64)
     final_bound_status: list[list[str]] = [["" for _ in range(grid_n)] for _ in range(grid_n)]
     counts = {"bounded": 0, "escape": 0, "collision": 0, "failed": 0}
-    for iy, dvy in enumerate(axis):
-        for ix, dvx in enumerate(axis):
-            state, mass = state_from_velocity_offsets(config, float(dvx), float(dvy))
-            try:
-                states = integrate_states(state, mass, t_eval, config)
-                classification = classify_basin_trajectory(states, t_eval, mass, config)
-            except Exception as exc:
-                classification = {
-                    "outcome": 3,
-                    "outcome_label": "failed",
-                    "time_to_escape": float("nan"),
-                    "time_to_collision": float("nan"),
-                    "final_bound_status": f"solver_failed: {exc}",
-                }
-            outcome = int(classification["outcome"])
-            label = str(classification["outcome_label"])
-            counts[label] += 1
-            outcomes[iy, ix] = outcome
-            time_to_escape[iy, ix] = float(classification["time_to_escape"])
-            time_to_collision[iy, ix] = float(classification["time_to_collision"])
-            final_bound_status[iy][ix] = str(classification["final_bound_status"])
+    started_progress = False
+    if not progress_active():
+        progress_start(grid_n * grid_n, "Basin outcome grid", {"ic": config.ic_mode, "backend": config.backend, "integrator": "DOP853"})
+        started_progress = True
+    try:
+        for iy, dvy in enumerate(axis):
+            for ix, dvx in enumerate(axis):
+                state, mass = state_from_velocity_offsets(config, float(dvx), float(dvy))
+                try:
+                    states = integrate_states(state, mass, t_eval, config)
+                    classification = classify_basin_trajectory(states, t_eval, mass, config)
+                except Exception as exc:
+                    classification = {
+                        "outcome": 3,
+                        "outcome_label": "failed",
+                        "time_to_escape": float("nan"),
+                        "time_to_collision": float("nan"),
+                        "final_bound_status": f"solver_failed: {exc}",
+                    }
+                outcome = int(classification["outcome"])
+                label = str(classification["outcome_label"])
+                counts[label] += 1
+                outcomes[iy, ix] = outcome
+                time_to_escape[iy, ix] = float(classification["time_to_escape"])
+                time_to_collision[iy, ix] = float(classification["time_to_collision"])
+                final_bound_status[iy][ix] = str(classification["final_bound_status"])
+                if started_progress:
+                    progress_update(1, {"status": label})
+    finally:
+        if started_progress:
+            progress_close()
     boundary = basin_boundary_statistics(outcomes)
     status = basin_status_from_counts(counts)
     return {
@@ -1870,6 +2348,121 @@ def diagnostic_consistency_table(
     }
 
 
+def nasa_tier_reliability_gate(
+    config: RunConfig,
+    diagnostics: dict[str, Any],
+    lyap: LyapunovResult,
+    hci: dict[str, Any],
+    advanced: dict[str, Any] | None,
+    ensemble: EnsembleResult | None,
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, passed: bool, value: Any, threshold: str, note: str) -> None:
+        checks.append(
+            {
+                "name": name,
+                "passed": bool(passed),
+                "value": value,
+                "threshold": threshold,
+                "note": note,
+            }
+        )
+
+    add(
+        "lyapunov_validation",
+        status_label(lyap.spectrum_validation.get("status")) == "passed",
+        lyap.spectrum_validation.get("status", "missing"),
+        "passed",
+        "Full QR spectrum validation gate.",
+    )
+    add(
+        "energy_drift",
+        float(diagnostics.get("max_abs_relative_energy_error", float("inf"))) <= 1e-8,
+        diagnostics.get("max_abs_relative_energy_error", float("nan")),
+        "<=1e-8",
+        "Conservative invariant drift gate.",
+    )
+    add(
+        "angular_momentum_drift",
+        float(diagnostics.get("max_angular_momentum_vector_drift", float("inf"))) <= 1e-8,
+        diagnostics.get("max_angular_momentum_vector_drift", float("nan")),
+        "<=1e-8",
+        "Angular momentum conservation gate.",
+    )
+    add(
+        "hci_numerical_reliability",
+        status_label(hci.get("numerical_reliability")) == "reliable",
+        hci.get("numerical_reliability", "missing"),
+        "reliable",
+        "HCI numerical component must not dominate physical chaos label.",
+    )
+    if advanced is not None:
+        add(
+            "reversibility",
+            float(advanced.get("reversibility", {}).get("relative_state_error", float("inf"))) <= 1e-8,
+            advanced.get("reversibility", {}).get("relative_state_error", float("nan")),
+            "<=1e-8",
+            "Forward-reverse return gate.",
+        )
+        add(
+            "structure_preservation",
+            float(advanced.get("structure_preservation", {}).get("relative_frobenius_error", float("inf"))) <= 1e-7,
+            advanced.get("structure_preservation", {}).get("relative_frobenius_error", float("nan")),
+            "<=1e-7",
+            "Local canonical tangent-flow residual gate, not a symplectic-integrator claim.",
+        )
+        add(
+            "ftle_horizon_detection",
+            status_label(advanced.get("automatic_convergence_horizon", {}).get("status")) == "stabilized_finite_time_window",
+            advanced.get("automatic_convergence_horizon", {}).get("status", "missing"),
+            "stabilized_finite_time_window",
+            "Finite-time running FTLE heuristic.",
+        )
+        add(
+            "noise_robustness",
+            status_label(advanced.get("stochastic_noise_robustness", {}).get("status")) in {"robust_within_tested_noise", "noise_sensitive"},
+            advanced.get("stochastic_noise_robustness", {}).get("status", "missing"),
+            "not noise_fragile",
+            "Seeded numerical-scale noise robustness screen.",
+        )
+        integrator_bench = diagnostics.get("cross_integrator_benchmark", {})
+        if isinstance(integrator_bench, dict) and integrator_bench:
+            add(
+                "cross_integrator_benchmark",
+                status_label(integrator_bench.get("overall_status")) in {"passed", "warning"},
+                integrator_bench.get("overall_status", "missing"),
+                "passed or warning",
+                "Cross-integrator validation is numerical evidence only.",
+            )
+    if ensemble is not None:
+        add(
+            "ensemble_size_nonzero",
+            int(ensemble.ensemble_size) > 0,
+            int(ensemble.ensemble_size),
+            ">0",
+            "Presence check for ensemble summary output.",
+        )
+    passed = sum(1 for row in checks if row["passed"])
+    failed = [row["name"] for row in checks if not row["passed"]]
+    if checks and passed == len(checks):
+        status = "nasa_tier_pass"
+    elif checks and passed >= max(1, int(0.75 * len(checks))):
+        status = "research_grade_with_cautions"
+    else:
+        status = "numerically_unresolved"
+    return {
+        "method": "codexpy_internal_reliability_gate",
+        "status": status,
+        "passed_checks": int(passed),
+        "total_checks": int(len(checks)),
+        "failed_checks": failed,
+        "checks": checks,
+        "claim_scope": "Internal reliability triage only; 'NASA-tier' is a strict engineering label, not peer-review acceptance or proof of physical truth.",
+        "publication_safe_wording": "This run passes the implemented internal reliability gate." if status == "nasa_tier_pass" else "This run requires the listed cautions before publication use.",
+    }
+
+
 def package_version_or_status(name: str, module: Any | None) -> str:
     if module is None:
         return "not_installed"
@@ -1885,6 +2478,16 @@ def file_sha256(path: Path) -> str:
         return digest.hexdigest()
     except Exception:
         return "unavailable"
+
+
+def module_import_hash(module: Any | None) -> dict[str, str]:
+    if module is None:
+        return {"status": "not_installed", "path": "", "sha256": ""}
+    path_text = str(getattr(module, "__file__", "") or "")
+    if not path_text:
+        return {"status": "no_import_file", "path": "", "sha256": ""}
+    path = Path(path_text)
+    return {"status": "ok" if path.exists() else "missing", "path": str(path), "sha256": file_sha256(path)}
 
 
 def pip_freeze_metadata() -> list[str]:
@@ -1940,14 +2543,6 @@ def reproducibility_metadata(config: RunConfig, root: Path) -> dict[str, Any]:
             cupy_module = None
     source_path = root / Path(__file__).name
     freeze = pip_freeze_metadata()
-    source_hashes = {
-        source_path.name: file_sha256(source_path),
-    }
-    module_dir = root / "three_body_chaos_modules"
-    if module_dir.exists():
-        for module_path in sorted(module_dir.glob("*.py")):
-            source_hashes[f"three_body_chaos_modules/{module_path.name}"] = file_sha256(module_path)
-
     metadata = {
         "command_line": sys.argv,
         "python_executable": sys.executable,
@@ -1963,7 +2558,17 @@ def reproducibility_metadata(config: RunConfig, root: Path) -> dict[str, Any]:
             "cupy": package_version_or_status("cupy", cupy_module),
         },
         "git": git_revision_metadata(root),
-        "source_hashes": source_hashes,
+        "source_hashes": {
+            source_path.name: file_sha256(source_path),
+        },
+        "dependency_import_hashes": {
+            "python_executable": {"path": sys.executable, "sha256": file_sha256(Path(sys.executable))},
+            "numpy": module_import_hash(np),
+            "scipy": module_import_hash(scipy),
+            "matplotlib": module_import_hash(matplotlib),
+            "rebound": module_import_hash(rebound),
+            "cupy": module_import_hash(cupy_module),
+        },
         "dependency_lock": {
             "pip_freeze_available": bool(freeze),
             "pip_freeze": freeze,
@@ -2014,6 +2619,7 @@ def claim_gate_evaluation(
     reference_benchmarks_passed = status_label(reference_benchmarks.get("overall_status")) == "passed"
     integrator_benchmarks = diagnostics.get("cross_integrator_benchmark", {})
     integrator_benchmarks_passed = status_label(integrator_benchmarks.get("overall_status")) == "passed"
+    replay_validation_status = status_label(diagnostics.get("replay_validation", {}).get("status"))
     convergence_status = status_label(convergence_validation.get("status")) if convergence_validation else "not_run"
     advanced_present = isinstance(advanced, dict)
     consistency_status = status_label(advanced.get("diagnostic_consistency", {}).get("status")) if advanced_present else "not_run"
@@ -2023,6 +2629,7 @@ def claim_gate_evaluation(
     basin_fractal_status = status_label(advanced.get("basin_fractal_convergence", {}).get("status")) if advanced_present else "not_run"
     ensemble_convergence_status = status_label(advanced.get("ensemble_convergence_analysis", {}).get("status")) if advanced_present else "not_run"
     lyapunov_horizon_status = status_label(advanced.get("lyapunov_horizon_sweep", {}).get("horizon_classification")) if advanced_present else "not_run"
+    nasa_tier_status = status_label(advanced.get("nasa_tier_reliability_gate", {}).get("status")) if advanced_present else "not_run"
     asymptotic_validation = advanced.get("lyapunov_asymptotic_validation", {}) if advanced_present else {}
     asymptotic_status = status_label(asymptotic_validation.get("classification")) if advanced_present else "not_run"
     asymptotic_claim_allowed = bool(asymptotic_validation.get("positive_asymptotic_lyapunov_claim_allowed", False))
@@ -2043,10 +2650,14 @@ def claim_gate_evaluation(
         safe_claims.append("The analyzer diagnostics are internally consistent at order-of-magnitude level for this run.")
     if reference_benchmarks_passed:
         safe_claims.append("The included reference benchmark smoke suite passed for this run.")
+    if replay_validation_status == "passed":
+        safe_claims.append("The serialized initial-condition replay payload passed the round-trip consistency check.")
     if lyapunov_horizon_status == "long_finite_time_robust":
         safe_claims.append("The horizon sweep supports long finite-time Lyapunov robustness for this run.")
     if asymptotic_claim_allowed:
         safe_claims.append("The strict long-horizon validation gate supports a numerical asymptotic Lyapunov claim for this run.")
+    if nasa_tier_status == "nasa_tier_pass":
+        safe_claims.append("This run passes the implemented internal NASA-tier reliability gate, which is an engineering triage label rather than proof of physical truth.")
     if core_hypothesis_supported:
         safe_claims.append(
             "The current code can support the stated hypothesis for tested finite-time regimes with conservative wording and reported validation status."
@@ -2060,6 +2671,7 @@ def claim_gate_evaluation(
         "Long finite-time Lyapunov robustness may be claimed only when --lyapunov-horizon-sweep was run and horizon_classification is long_finite_time_robust.",
         "Asymptotic Lyapunov claims may be made only when --lyapunov-asymptotic-validation was run and classification is asymptotic_numerical_support.",
         "REBOUND-specific conclusions require the run to use or benchmark the named REBOUND integrator explicitly.",
+        "NASA-tier reliability wording may be used only when the internal nasa_tier_reliability_gate status is nasa_tier_pass.",
     ]
 
     unsafe_claims = [
@@ -2079,6 +2691,8 @@ def claim_gate_evaluation(
         unsafe_claims.append("Do not claim fractal basin structure from this run.")
     if lyapunov_horizon_status != "long_finite_time_robust":
         unsafe_claims.append("Do not claim long finite-time Lyapunov robustness from this run unless the horizon sweep passes.")
+    if nasa_tier_status != "nasa_tier_pass":
+        unsafe_claims.append("Do not claim this run passes the internal NASA-tier reliability gate.")
     if not asymptotic_claim_allowed:
         unsafe_claims.append("No asymptotic Lyapunov claim is supported by the current numerical evidence.")
 
@@ -2097,7 +2711,7 @@ def claim_gate_evaluation(
             "Issue": "Reports lacked explicit safe/conditional/unsafe claim gating.",
             "Why it matters": "The core hypothesis can be overstated if validation status is not tied to allowed claims.",
             "Action taken": "Added automatic claim gate output and closure artifacts.",
-            "Files changed": ["3BS-Simulator.py"],
+            "Files changed": ["codexpy.py"],
             "Validation performed": "Verified generated claim_gate.md and validation_summary.json in smoke outputs.",
             "Residual limitation": "Claim gate is conservative and depends on diagnostics actually run.",
             "Status": "FIXED",
@@ -2108,7 +2722,7 @@ def claim_gate_evaluation(
             "Issue": "Finite-time diagnostics could be read as asymptotic Lyapunov claims.",
             "Why it matters": "The stated hypothesis concerns finite-time regimes; asymptotic claims need longer convergence evidence.",
             "Action taken": "Added explicit finite-time wording and unsafe asymptotic-claim gate.",
-            "Files changed": ["3BS-Simulator.py"],
+            "Files changed": ["codexpy.py"],
             "Validation performed": "Report and claim gate include finite-time wording.",
             "Residual limitation": "Long-horizon asymptotic studies remain optional future work.",
             "Status": "FIXED",
@@ -2119,7 +2733,7 @@ def claim_gate_evaluation(
             "Issue": "Unsupported physical claims were not surfaced automatically.",
             "Why it matters": "Reviewer-facing outputs must identify claims not supported by the current run.",
             "Action taken": "Generated known limitations, future work, and unsafe-claims sections per run.",
-            "Files changed": ["3BS-Simulator.py"],
+            "Files changed": ["codexpy.py"],
             "Validation performed": "Closure artifacts are generated with each report.",
             "Residual limitation": "Human paper text must still quote the correct generated claims.",
             "Status": "FIXED",
@@ -2130,7 +2744,7 @@ def claim_gate_evaluation(
             "Issue": "Reproducibility manifest lacked source hash and dependency lock data.",
             "Why it matters": "Paper runs need replay metadata independent of git availability.",
             "Action taken": "Added source SHA256, manifest hash, and pip-freeze dependency snapshot.",
-            "Files changed": ["3BS-Simulator.py"],
+            "Files changed": ["codexpy.py"],
             "Validation performed": "reproducibility_manifest.json is checked after smoke runs.",
             "Residual limitation": "Exact floating-point replay can still vary by hardware/BLAS/CUDA.",
             "Status": "FIXED",
@@ -2141,7 +2755,7 @@ def claim_gate_evaluation(
             "Issue": "Analyzer reliability needed an explicit contradictory-run summary.",
             "Why it matters": "Composite diagnostics can disagree; that must be visible without manual JSON inspection.",
             "Action taken": "Closure outputs include diagnostic consistency and reliability horizon statuses.",
-            "Files changed": ["3BS-Simulator.py"],
+            "Files changed": ["codexpy.py"],
             "Validation performed": "Advanced smoke run produced diagnostic_consistency status.",
             "Residual limitation": "Order-of-magnitude consistency is not a formal statistical agreement test.",
             "Status": "FIXED",
@@ -2202,6 +2816,7 @@ def claim_gate_evaluation(
             "numerical_reliability": hci.get("numerical_reliability", "missing"),
             "reference_benchmarks": reference_benchmarks.get("overall_status", "not_run"),
             "cross_integrator_benchmarks": integrator_benchmarks.get("overall_status", "not_run"),
+            "replay_validation": replay_validation_status,
             "convergence_validation": convergence_status,
             "diagnostic_consistency": consistency_status,
             "reliability_horizon": reliability_horizon_status,
@@ -2212,6 +2827,7 @@ def claim_gate_evaluation(
             "lyapunov_horizon_classification": lyapunov_horizon_status,
             "lyapunov_asymptotic_classification": asymptotic_status,
             "asymptotic_claim_allowed": asymptotic_claim_allowed,
+            "nasa_tier_reliability_gate": nasa_tier_status,
         },
         "safe_claims": safe_claims,
         "conditional_claims": conditional_claims,

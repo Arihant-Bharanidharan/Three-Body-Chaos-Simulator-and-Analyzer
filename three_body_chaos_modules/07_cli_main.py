@@ -1,5 +1,5 @@
-﻿# Auto-split implementation module for 3BS-Simulator.py.
-# Generated from the original monolithic simulator to keep the CLI stable while making the codebase navigable.
+# Auto-split implementation module for 3BS-Simulator.py.
+# Generated from codexpy.py so the public GitHub simulator tracks the local monolithic research engine.
 
 # =========================
 # CLI
@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--convergence-validation", action="store_true")
     parser.add_argument("--benchmark-suite", action="store_true")
     parser.add_argument("--benchmark-integrators", action="store_true")
+    parser.add_argument("--cross-integrator-benchmark", action="store_true", help="alias for --benchmark-integrators with reviewer-facing cross-integrator outputs")
     parser.add_argument("--parameter-sweep-samples", type=int, default=12)
     parser.add_argument("--spectrum-nperseg", type=int, default=0)
     parser.add_argument("--spectrum-overlap", type=int, default=-1)
@@ -69,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--true-run-compact", action="store_true")
     parser.add_argument("--keep-raw-trajectories", action="store_true")
     parser.add_argument("--confirm-large-run", action="store_true", help="required when ensemble-size exceeds 10000")
+    parser.add_argument("--quiet", action="store_true", help="disable live CLI progress bars")
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--quick", action="store_true")
     return parser
@@ -117,7 +119,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         inclination_max=args.inclination_max,
         convergence_validation=args.convergence_validation,
         benchmark_suite=args.benchmark_suite,
-        benchmark_integrators=args.benchmark_integrators,
+        benchmark_integrators=args.benchmark_integrators or args.cross_integrator_benchmark,
         parameter_sweep_samples=args.parameter_sweep_samples,
         spectrum_nperseg=args.spectrum_nperseg,
         spectrum_overlap=args.spectrum_overlap,
@@ -139,6 +141,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         true_run_compact=args.true_run_compact,
         keep_raw_trajectories=args.keep_raw_trajectories,
         confirm_large_run=args.confirm_large_run,
+        quiet=args.quiet,
     )
     if config.position_scale <= 0.0 or config.velocity_scale <= 0.0:
         raise ValueError("position-scale and velocity-scale must be positive.")
@@ -192,6 +195,7 @@ def main() -> int:
         )
         return 2
     config = config_from_args(args)
+    init_live_progress(config.quiet)
 
     root = Path(__file__).resolve().parent
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -208,22 +212,59 @@ def main() -> int:
         print("REBOUND is not installed; this run cannot use the REBOUND backend.")
         return 2
 
-    reference, initial_condition = simulate(config, velocity_perturbation=0.0)
+    base_stats = {
+        "ic": config.ic_mode,
+        "backend": config.backend,
+        "integrator": config.rebound_integrator if config.backend == "rebound" else "DOP853",
+    }
+    reference, initial_condition = progress_call(
+        "Reference trajectory",
+        base_stats,
+        lambda: simulate(config, velocity_perturbation=0.0),
+    )
     mass = initial_condition.mass
-    perturbed, _ = simulate(config, velocity_perturbation=config.perturbation)
+    perturbed, _ = progress_call(
+        "Perturbed trajectory",
+        {**base_stats, "status": f"delta={config.perturbation:.1e}"},
+        lambda: simulate(config, velocity_perturbation=config.perturbation),
+    )
     lyap, _ = lyapunov_benettin(config)
-    diagnostics = summarize_trajectory(reference, mass)
+    progress_stats({"lambda": f"{lyap.exponent:.3e}"})
+    diagnostics = progress_call(
+        "Conservation diagnostics",
+        {**base_stats, "lambda": f"{lyap.exponent:.3e}"},
+        lambda: summarize_trajectory(reference, mass),
+    )
+    diagnostics["replay_validation"] = replay_validation_certificate(initial_condition)
     if config.benchmark_suite:
-        diagnostics["reference_benchmarks"] = reference_benchmark_suite(config)
+        diagnostics["reference_benchmarks"] = progress_call(
+            "Reference benchmarks",
+            base_stats,
+            lambda: reference_benchmark_suite(config),
+        )
     if config.benchmark_integrators:
         diagnostics["cross_integrator_benchmark"] = cross_integrator_benchmark(config, initial_condition)
-    divergence = divergence_summary(reference, perturbed)
+        write_cross_integrator_benchmark_outputs(out, diagnostics["cross_integrator_benchmark"])
+    divergence = progress_call(
+        "Divergence summary",
+        {**base_stats, "lambda": f"{lyap.exponent:.3e}", "energy": f"{diagnostics['max_abs_relative_energy_error']:.3e}"},
+        lambda: divergence_summary(reference, perturbed),
+    )
     hci_reversibility = reversibility_error(
         config,
         min(config.duration, max(config.diagnostic_duration, config.renorm_time)),
         config.max_step if config.max_step > 0.0 else None,
     )
     hci = hamiltonian_chaos_index(lyap, diagnostics, hci_reversibility)
+    progress_stage(
+        "HCI claim-gated embedding",
+        {
+            **base_stats,
+            "lambda": f"{lyap.exponent:.3e}",
+            "energy": f"{diagnostics['max_abs_relative_energy_error']:.3e}",
+            "hci": f"{hci['score']:.3e}",
+        },
+    )
     convergence_validation = convergence_validation_suite(config) if config.convergence_validation else None
 
     ensemble = None
@@ -258,19 +299,24 @@ def main() -> int:
             if config.advanced and advanced is not None and "ensemble_convergence_analysis" not in advanced:
                 plot_ensemble_convergence(ensemble, out)
 
-    write_report(
-        out,
-        config,
-        initial_condition,
-        diagnostics,
-        divergence,
-        lyap,
-        hci,
-        convergence_validation,
-        ensemble,
-        advanced,
-        issues,
-    )
+    progress_start(1, "Writing reports", {**base_stats, "lambda": f"{lyap.exponent:.3e}", "energy": f"{diagnostics['max_abs_relative_energy_error']:.3e}", "hci": f"{hci['score']:.3e}"})
+    try:
+        write_report(
+            out,
+            config,
+            initial_condition,
+            diagnostics,
+            divergence,
+            lyap,
+            hci,
+            convergence_validation,
+            ensemble,
+            advanced,
+            issues,
+        )
+        progress_update(1, {"status": "done"})
+    finally:
+        progress_close()
     true_run_index = None
     if config.true_run:
         true_run_index = finalize_true_run_outputs(
@@ -324,6 +370,11 @@ def main() -> int:
         print(f"SALI: {advanced['chaos_indicators']['sali']:.3e}")
         print(f"MEGNO: {advanced['chaos_indicators']['megno']:.3e}")
         print(f"Mean MEGNO: {advanced['chaos_indicators']['mean_megno']:.3e}")
+        print(f"Shadowing time: {advanced['shadowing_time'].get('shadowing_time_estimate', float('nan')):.3e}")
+        print(f"Noise robustness: {advanced['stochastic_noise_robustness'].get('status', 'unknown')}")
+        print(f"Timestep resonance screen: {advanced['timestep_resonance'].get('status', 'unknown')}")
+        print(f"Automatic FTLE horizon: {advanced['automatic_convergence_horizon'].get('status', 'unknown')}")
+        print(f"Internal NASA-tier reliability gate: {advanced['nasa_tier_reliability_gate'].get('status', 'unknown')}")
         print(f"Reliability horizon: {advanced['reliability_horizon']['status']}")
         print(f"Basin status: {advanced['basin_boundary'].get('basin_status', 'unknown')}")
         print(f"Ensemble convergence: {advanced.get('ensemble_convergence_analysis', {}).get('status', 'not_run')}")
@@ -366,5 +417,3 @@ def main() -> int:
 
     print("Quality gate: passed")
     return 0
-
-

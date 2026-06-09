@@ -1,8 +1,8 @@
-﻿# Auto-split implementation module for 3BS-Simulator.py.
-# Generated from the original monolithic simulator to keep the CLI stable while making the codebase navigable.
+# Auto-split implementation module for 3BS-Simulator.py.
+# Generated from codexpy.py so the public GitHub simulator tracks the local monolithic research engine.
 
 # =============================================================================
-# Mapping Stability and Chaos in the Three-Body Problem
+# CodexPy - High-Precision Paranoid Three-Body Chaos Simulator
 # Copyright (c) 2026 Arihant Bharanidharan. All Rights Reserved.
 #
 # Contact: Arihantbharani@outlook.com
@@ -74,11 +74,195 @@ def with_report_notice(lines: list[str]) -> list[str]:
 
 
 def print_runtime_notice() -> None:
-    print("=== Three-Body Chaos Mapping - Copyright (c) 2026 Arihant Bharanidharan ===")
+    print("=== CodexPy - Copyright (c) 2026 Arihant Bharanidharan ===")
     print("Contact: Arihantbharani@outlook.com")
     print("Licensed under PolyForm Noncommercial License 1.0.0")
     print("Commercial use requires prior written permission.")
     print("Redistribution must preserve attribution and license notices.\n")
+
+
+# === LIVE CLI PROGRESS BAR UPGRADE ===
+class LiveProgress:
+    def __init__(self, quiet: bool = False) -> None:
+        self.quiet = bool(quiet)
+        self.total = 0
+        self.n = 0
+        self.label = ""
+        self.stats: dict[str, Any] = {}
+        self.started = 0.0
+        self.last_manual_write = 0.0
+        self._bar: Any | None = None
+        self._tqdm: Any | None = None
+        if not self.quiet:
+            try:
+                from tqdm.auto import tqdm  # type: ignore
+
+                self._tqdm = tqdm
+            except Exception:
+                self._tqdm = None
+
+    @property
+    def active(self) -> bool:
+        return self._bar is not None or (not self.quiet and self.total > 0 and self.n < self.total)
+
+    def _stats_text(self, stats: dict[str, Any] | None = None) -> str:
+        merged = dict(self.stats)
+        if stats:
+            merged.update(stats)
+        ordered = [
+            ("ic", "IC"),
+            ("mode", "mode"),
+            ("backend", "backend"),
+            ("integrator", "int"),
+            ("lambda", "lambda"),
+            ("energy", "dE"),
+            ("hci", "HCI"),
+            ("ensemble", "ensemble"),
+            ("status", "status"),
+        ]
+        parts: list[str] = []
+        for key, label in ordered:
+            value = merged.get(key)
+            if value is not None and value != "":
+                parts.append(f"{label}={value}")
+        for key, value in merged.items():
+            if key not in {item[0] for item in ordered} and value is not None and value != "":
+                parts.append(f"{key}={value}")
+        return " | ".join(parts)
+
+    def start(self, total: int, label: str, stats: dict[str, Any] | None = None) -> None:
+        if self.quiet:
+            return
+        self.close()
+        self.total = max(1, int(total))
+        self.n = 0
+        self.label = str(label)
+        self.stats = dict(stats or {})
+        self.started = time.perf_counter()
+        self.last_manual_write = 0.0
+        if self._tqdm is not None:
+            bar_format = (
+                "{desc} | Progress {bar:24} {percentage:3.0f}% | "
+                "{n_fmt}/{total_fmt} | elapsed {elapsed} | ETA {remaining} | {postfix}"
+            )
+            self._bar = self._tqdm(
+                total=self.total,
+                desc=f"Current Run: {self.label}",
+                bar_format=bar_format,
+                dynamic_ncols=True,
+                mininterval=0.25,
+                leave=False,
+                ascii=False,
+            )
+            text = self._stats_text()
+            if text:
+                self._bar.set_postfix_str(text, refresh=False)
+        else:
+            self._manual_write(force=True)
+
+    def update(self, amount: int = 1, stats: dict[str, Any] | None = None) -> None:
+        if self.quiet or self.total <= 0:
+            return
+        if stats:
+            self.stats.update(stats)
+        amount = max(0, int(amount))
+        self.n = min(self.total, self.n + amount)
+        if self._bar is not None:
+            self._bar.update(amount)
+            text = self._stats_text()
+            if text:
+                self._bar.set_postfix_str(text, refresh=False)
+        else:
+            self._manual_write(force=self.n >= self.total)
+
+    def set_stats(self, stats: dict[str, Any]) -> None:
+        if self.quiet:
+            return
+        self.stats.update(stats)
+        if self._bar is not None:
+            text = self._stats_text()
+            if text:
+                self._bar.set_postfix_str(text, refresh=False)
+        elif self.total > 0:
+            self._manual_write(force=False)
+
+    def close(self) -> None:
+        if self.quiet:
+            return
+        if self._bar is not None:
+            self._bar.close()
+            self._bar = None
+        elif self.total > 0 and self.n >= self.total:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        self.total = 0
+        self.n = 0
+        self.label = ""
+        self.stats = {}
+
+    def _manual_write(self, force: bool = False) -> None:
+        now = time.perf_counter()
+        if not force and now - self.last_manual_write < 0.25:
+            return
+        self.last_manual_write = now
+        fraction = min(1.0, self.n / max(self.total, 1))
+        filled = int(round(24 * fraction))
+        bar = "█" * filled + "░" * (24 - filled)
+        elapsed = max(now - self.started, 0.0)
+        eta = (elapsed / max(self.n, 1)) * max(self.total - self.n, 0) if self.n else float("nan")
+        eta_text = "--:--" if not np.isfinite(eta) else f"{eta:6.1f}s"
+        stats = self._stats_text()
+        sys.stderr.write(
+            f"\rCurrent Run: {self.label} | Progress [{bar}] {100.0 * fraction:5.1f}% | "
+            f"{self.n}/{self.total} | elapsed {elapsed:6.1f}s | ETA {eta_text}"
+            + (f" | {stats}" if stats else "")
+        )
+        sys.stderr.flush()
+
+
+_LIVE_PROGRESS = LiveProgress(quiet=True)
+
+
+def init_live_progress(quiet: bool = False) -> None:
+    global _LIVE_PROGRESS
+    _LIVE_PROGRESS.close()
+    _LIVE_PROGRESS = LiveProgress(quiet=quiet)
+
+
+def progress_start(total: int, label: str, stats: dict[str, Any] | None = None) -> None:
+    _LIVE_PROGRESS.start(total, label, stats)
+
+
+def progress_update(amount: int = 1, stats: dict[str, Any] | None = None) -> None:
+    _LIVE_PROGRESS.update(amount, stats)
+
+
+def progress_stats(stats: dict[str, Any]) -> None:
+    _LIVE_PROGRESS.set_stats(stats)
+
+
+def progress_close() -> None:
+    _LIVE_PROGRESS.close()
+
+
+def progress_active() -> bool:
+    return _LIVE_PROGRESS.active
+
+
+def progress_stage(label: str, stats: dict[str, Any] | None = None) -> None:
+    progress_start(1, label, stats)
+    progress_update(1, stats)
+    progress_close()
+
+
+def progress_call(label: str, stats: dict[str, Any], func: Any) -> Any:
+    progress_start(1, label, stats)
+    try:
+        result = func()
+        progress_update(1, {**stats, "status": "done"})
+        return result
+    finally:
+        progress_close()
 
 
 # =========================
@@ -184,6 +368,7 @@ class RunConfig:
     true_run_compact: bool = False
     keep_raw_trajectories: bool = False
     confirm_large_run: bool = False
+    quiet: bool = False
 
 
 @dataclass

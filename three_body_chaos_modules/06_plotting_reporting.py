@@ -1,5 +1,5 @@
-﻿# Auto-split implementation module for 3BS-Simulator.py.
-# Generated from the original monolithic simulator to keep the CLI stable while making the codebase navigable.
+# Auto-split implementation module for 3BS-Simulator.py.
+# Generated from codexpy.py so the public GitHub simulator tracks the local monolithic research engine.
 
 # =========================
 # PLOTS AND REPORTS
@@ -770,20 +770,26 @@ def run_advanced_diagnostics(
         "parameter_sweep": parameter_sweep_analysis(config),
         "reliability_horizon": reliability_horizon_suite(config),
         "phase_space_distance": phase_space_distance_summary(reference, perturbed),
+        "shadowing_time": shadowing_time_estimate(reference, perturbed, config.perturbation),
         "poincare_section": best_poincare_section(reference),
         "power_spectrum": power_spectrum_data(
             reference,
             nperseg=config.spectrum_nperseg if config.spectrum_nperseg > 0 else None,
             overlap=config.spectrum_overlap if config.spectrum_overlap >= 0 else None,
         ),
+        "metric_uncertainty": trajectory_metric_uncertainty(reference, perturbed, mass, config.seed + 1212),
         "chaos_indicators": chaos_indicators(config),
         "lyapunov_bootstrap_ci_95": lyapunov_window_ci["ci_95"],
         "lyapunov_block_bootstrap": lyapunov_window_ci,
+        "lyapunov_jackknife": jackknife_mean_ci(np.asarray(lyap.segment_log_growths, dtype=float) / max(config.renorm_time, DIST_FLOOR)),
+        "automatic_convergence_horizon": automatic_convergence_horizon_detection(lyap),
         "ftle_field": ftle_field_map(config),
         "basin_boundary": basin,
         "basin_fractal_convergence": basin_fractal_convergence(config),
         "gpu_cpu_validation": gpu_cpu_validation(config, initial_condition),
+        "stochastic_noise_robustness": stochastic_noise_robustness_tests(config, initial_condition),
     }
+    diagnostics["timestep_resonance"] = timestep_resonance_diagnostic(config, reference, diagnostics["power_spectrum"])
     diagnostics["basin_summary"] = write_basin_outputs(basin, config, out)
     if config.lyapunov_horizon_sweep:
         diagnostics["lyapunov_horizon_sweep"] = lyapunov_horizon_sweep_analysis(config)
@@ -801,6 +807,7 @@ def run_advanced_diagnostics(
         diagnostics["ensemble_convergence_analysis"] = ensemble_convergence_analysis(config, initial_condition, ensemble)
         write_ensemble_convergence_outputs(out, diagnostics["ensemble_convergence_analysis"])
     diagnostics["diagnostic_consistency"] = diagnostic_consistency_table(lyap, divergence, diagnostics, ensemble, config)
+    diagnostics["nasa_tier_reliability_gate"] = nasa_tier_reliability_gate(config, diagnostics, lyap, hci=hamiltonian_chaos_index(lyap, summarize_trajectory(reference, mass), diagnostics["reversibility"]), advanced=diagnostics, ensemble=ensemble)
     diagnostics["evidence_strength"] = evidence_strength_summary(diagnostics)
     write_evidence_strength_summary(out, diagnostics["evidence_strength"])
 
@@ -878,6 +885,7 @@ def write_report(
     (out / "initial_condition.json").write_text(json.dumps(with_license_metadata(initial_condition_payload), indent=2), encoding="utf-8")
     (out / "reproducibility.json").write_text(json.dumps(with_license_metadata(reproducibility), indent=2), encoding="utf-8")
     (out / "summary.json").write_text(json.dumps(with_license_metadata(payload), indent=2), encoding="utf-8")
+    write_ml_feature_hook(out, config, initial_condition, diagnostics, lyap, hci, advanced, ensemble, closure)
     write_closure_artifacts(out, closure, reproducibility)
 
     lines = [
@@ -1002,6 +1010,11 @@ def write_report(
         power_spectrum = advanced["power_spectrum"]
         gpu_validation = advanced["gpu_cpu_validation"]
         consistency = advanced["diagnostic_consistency"]
+        shadowing = advanced["shadowing_time"]
+        noise = advanced["stochastic_noise_robustness"]
+        resonance = advanced["timestep_resonance"]
+        horizon_auto = advanced["automatic_convergence_horizon"]
+        nasa_gate = advanced["nasa_tier_reliability_gate"]
         basin_status = advanced["basin_boundary"].get("basin_status", "unknown")
         ensemble_status = advanced.get("ensemble_convergence_analysis", {}).get("status", "not_run")
         horizon_status = advanced.get("lyapunov_horizon_sweep", {}).get("horizon_classification", "not_run")
@@ -1025,8 +1038,19 @@ def write_report(
                 f"- Welch spectral entropy: {power_spectrum['welch_spectral_entropy']:.3e}",
                 f"- Welch nperseg/noverlap: {power_spectrum.get('nperseg', 0)} / {power_spectrum.get('noverlap', 0)}",
                 f"- Spectrum frequency resolution warning: {power_spectrum.get('frequency_resolution_warning', False)}",
+                f"- Multi-taper spectrum status: {power_spectrum.get('multitaper', {}).get('status', 'unknown')}",
                 f"- Lyapunov block-bootstrap CI95: "
                 f"[{block_bootstrap['ci_95'][0]:.3e}, {block_bootstrap['ci_95'][1]:.3e}]",
+                f"- Lyapunov jackknife CI95: "
+                f"[{advanced['lyapunov_jackknife']['ci_95'][0]:.3e}, {advanced['lyapunov_jackknife']['ci_95'][1]:.3e}]",
+                f"- Automatic FTLE horizon status: {horizon_auto.get('status', 'unknown')}",
+                f"- Shadowing time estimate: {shadowing.get('shadowing_time_estimate', float('nan')):.3e} "
+                f"({shadowing.get('status', 'unknown')})",
+                f"- Timestep resonance screen: {resonance.get('status', 'unknown')}",
+                f"- Stochastic noise robustness: {noise.get('status', 'unknown')} "
+                f"(FTLE spread {float(noise.get('ftle_relative_spread', float('nan'))):.3e})",
+                f"- Internal NASA-tier reliability gate: {nasa_gate.get('status', 'unknown')} "
+                f"({nasa_gate.get('passed_checks', 0)}/{nasa_gate.get('total_checks', 0)} checks)",
                 f"- Reliability horizon status: {reliability['status']} "
                 f"(min horizon {reliability['minimum_reliability_horizon']:.3e})",
                 f"- Basin map status: {basin_status}",
@@ -1280,6 +1304,13 @@ def write_master_results_csv(
         "spectrum_sum",
         "max_relative_energy_error",
         "max_angular_momentum_vector_drift",
+        "hci",
+        "hci_label",
+        "lambda_only_score",
+        "physical_score",
+        "lambda_only_label",
+        "regime_label",
+        "reliability_pass",
         "physical_regime",
         "numerical_reliability",
         "ensemble_backend",
@@ -1302,6 +1333,13 @@ def write_master_results_csv(
         "spectrum_sum": lyap.spectrum_sum,
         "max_relative_energy_error": diagnostics.get("max_abs_relative_energy_error", float("nan")),
         "max_angular_momentum_vector_drift": diagnostics.get("max_angular_momentum_vector_drift", float("nan")),
+        "hci": hci.get("score", float("nan")),
+        "hci_label": hci.get("diagnostic_regime", hci.get("regime", "unknown")),
+        "lambda_only_score": hci.get("lambda_only_score", float("nan")),
+        "physical_score": hci.get("physical_score", float("nan")),
+        "lambda_only_label": hci.get("physical_regime", "unknown"),
+        "regime_label": hci.get("diagnostic_regime", hci.get("regime", "unknown")),
+        "reliability_pass": hci.get("numerical_reliability") in {"reliable", "caution"},
         "physical_regime": hci.get("physical_regime", "unknown"),
         "numerical_reliability": hci.get("numerical_reliability", "unknown"),
         "ensemble_backend": ensemble.backend,
@@ -1316,6 +1354,94 @@ def write_master_results_csv(
         handle.write(",".join(columns) + "\n")
         handle.write(",".join(str(row[column]) for column in columns) + "\n")
     return path
+
+
+def write_ml_feature_hook(
+    out: Path,
+    config: RunConfig,
+    initial_condition: InitialCondition,
+    diagnostics: dict[str, Any],
+    lyap: LyapunovResult,
+    hci: dict[str, Any],
+    advanced: dict[str, Any] | None,
+    ensemble: EnsembleResult | None,
+    closure: dict[str, Any],
+) -> Path:
+    advanced = advanced or {}
+    chaos = advanced.get("chaos_indicators", {})
+    recurrence = advanced.get("recurrence", {})
+    ftle_field = advanced.get("ftle_field", {})
+    basin = advanced.get("basin_boundary", {})
+    basin_fractal = advanced.get("basin_fractal_convergence", {})
+    structure = advanced.get("structure_preservation", {})
+    noise = advanced.get("stochastic_noise_robustness", {})
+    horizon = advanced.get("automatic_convergence_horizon", {})
+    nasa_gate = advanced.get("nasa_tier_reliability_gate", {})
+    pair_validation = lyap.spectrum_validation or {}
+    finite_pairing = pair_validation.get("finite_time_symplectic_pairing", {})
+    row = {
+        "run_id": out.name,
+        "run_type": run_type_for_config(config),
+        "ic_mode": config.ic_mode,
+        "family": initial_condition.config.mode,
+        "seed": int(config.seed),
+        "ensemble_size": int(ensemble.ensemble_size) if ensemble else int(config.ensemble_size),
+        "backend": config.backend,
+        "rebound_integrator": config.rebound_integrator,
+        "ensemble_integrator": ensemble.integrator if ensemble else config.ensemble_integrator,
+        "benchmark_control_flag": bool(config.ic_mode == "figure8" or run_type_for_config(config) == "VALIDATION_REFERENCE"),
+        "largest_lyapunov": float(lyap.exponent),
+        "lambda_max": float(lyap.exponent),
+        "spectrum_width": float(max(lyap.spectrum) - min(lyap.spectrum)) if lyap.spectrum else float("nan"),
+        "spectrum_sum": float(lyap.spectrum_sum),
+        "spectrum_pairing_residual": pair_validation.get("configured_max_pairing_residual", pair_validation.get("max_abs_qr_pairing_residual", float("nan"))),
+        "symplectic_residual": finite_pairing.get("symplectic_residual_relative_frobenius", structure.get("relative_frobenius_error", float("nan"))),
+        "qr_orthogonality_error": float(lyap.qr_orthogonality_error),
+        "tangent_condition_number": float(lyap.tangent_condition_number),
+        "hci": float(hci.get("score", float("nan"))),
+        "hci_label": hci.get("diagnostic_regime", hci.get("regime", "unknown")),
+        "physical_score": hci.get("physical_score", float("nan")),
+        "lambda_only_score": hci.get("lambda_only_score", float("nan")),
+        "lambda_only_label": hci.get("physical_regime", classify_system(lyap.exponent)),
+        "regime_label": hci.get("diagnostic_regime", hci.get("physical_regime", "unknown")),
+        "energy_drift_rel": diagnostics.get("max_abs_relative_energy_error", float("nan")),
+        "energy_drift_abs": diagnostics.get("max_abs_relative_energy_error", float("nan")),
+        "angular_momentum_drift_rel": diagnostics.get("max_angular_momentum_vector_drift", float("nan")),
+        "angular_momentum_drift_abs": diagnostics.get("max_angular_momentum_vector_drift", float("nan")),
+        "reversibility_error": advanced.get("reversibility", {}).get("relative_state_error", float("nan")),
+        "closest_encounter": diagnostics.get("closest_encounter_distance", float("nan")),
+        "megno": chaos.get("megno", float("nan")),
+        "mean_megno": chaos.get("mean_megno", float("nan")),
+        "sali": chaos.get("sali", float("nan")),
+        "fli": chaos.get("log_fli", float("nan")),
+        "recurrence_rate": recurrence.get("recurrence_rate", float("nan")),
+        "determinism": recurrence.get("determinism_lmin2", float("nan")),
+        "laminarity": recurrence.get("laminarity_vmin2", float("nan")),
+        "spectral_entropy": advanced.get("power_spectrum", {}).get("welch_spectral_entropy", float("nan")),
+        "ftle_mean": ftle_field.get("median", float("nan")),
+        "ftle_max": ftle_field.get("max", float("nan")),
+        "basin_boundary_fraction": basin.get("boundary_fraction", float("nan")),
+        "basin_fractal_dimension": basin_fractal.get("box_counting_dimension_estimate", float("nan")),
+        "noise_robustness_status": noise.get("status", "not_run"),
+        "noise_ftle_relative_spread": noise.get("ftle_relative_spread", float("nan")),
+        "horizon_convergence_status": horizon.get("status", "not_run"),
+        "nasa_tier_status": nasa_gate.get("status", "not_run"),
+        "reliability_pass": bool(
+            hci.get("numerical_reliability") in {"reliable", "caution"}
+            and lyap.spectrum_validation.get("status") == "passed"
+            and not closure.get("blocking_issues")
+        ),
+        "claim_gate_safe": bool(closure.get("paper_readiness", {}).get("supports_stated_hypothesis_without_overclaiming", False)),
+        "analyzer_note": "HCI is a normalized diagnostic embedding, not a physical invariant. ML features are exploratory and claim-gated.",
+    }
+    json_path = out / "ml_feature_vector.json"
+    csv_path = out / "ml_feature_vector.csv"
+    json_path.write_text(json.dumps(with_license_metadata({"feature_vector": row}), indent=2), encoding="utf-8")
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        writer.writeheader()
+        writer.writerow(row)
+    return csv_path
 
 
 def diagnostic_status_lists(
@@ -1431,6 +1557,10 @@ def finalize_true_run_outputs(
         "ensemble_convergence.csv": out / "ensemble_convergence.csv",
         "lyapunov_horizon_convergence.csv": out / "lyapunov_horizon_convergence.csv",
         "basin_summary.json": out / "basin_summary.json",
+        "ml_feature_vector.csv": out / "ml_feature_vector.csv",
+        "ml_feature_vector.json": out / "ml_feature_vector.json",
+        "cross_integrator_benchmark.csv": out / "cross_integrator_benchmark.csv",
+        "cross_integrator_benchmark.md": out / "cross_integrator_benchmark.md",
     }
     for name, source in key_copies.items():
         if source is not None:

@@ -1,5 +1,5 @@
-﻿# Auto-split implementation module for 3BS-Simulator.py.
-# Generated from the original monolithic simulator to keep the CLI stable while making the codebase navigable.
+# Auto-split implementation module for 3BS-Simulator.py.
+# Generated from codexpy.py so the public GitHub simulator tracks the local monolithic research engine.
 
 # =========================
 # INITIAL CONDITIONS
@@ -528,6 +528,34 @@ def initial_condition_to_dict(ic: InitialCondition) -> dict[str, Any]:
         "classification": ic.classification,
         "metadata": ic.metadata,
     }
+
+
+def replay_validation_certificate(ic: InitialCondition) -> dict[str, Any]:
+    payload = initial_condition_to_dict(ic)
+    try:
+        pos = np.asarray(payload["position"], dtype=float)
+        vel = np.asarray(payload["velocity"], dtype=float)
+        mass = np.asarray(payload["mass"], dtype=float)
+        state = np.asarray(payload["state"], dtype=float)
+        reconstructed = pack_state(pos, vel)
+        state_error = float(np.linalg.norm(reconstructed - state) / state_norm(state))
+        mass_finite = bool(np.isfinite(mass).all() and np.all(mass > 0.0))
+        replay_source = str(ic.metadata.get("source", "generated_payload"))
+        return {
+            "method": "initial_condition_payload_roundtrip",
+            "status": "passed" if state_error <= 1e-15 and mass_finite else "failed",
+            "state_roundtrip_relative_error": state_error,
+            "mass_positive_finite": mass_finite,
+            "source": replay_source,
+            "replay_command_hint": "--ic-replay initial_condition.json",
+            "claim_scope": "Replay certificate validates serialized initial-condition consistency, not bitwise trajectory reproducibility across hardware.",
+        }
+    except Exception as exc:
+        return {
+            "method": "initial_condition_payload_roundtrip",
+            "status": "failed",
+            "reason": str(exc),
+        }
 
 
 def integrator_config(config: RunConfig) -> IntegratorConfig:
