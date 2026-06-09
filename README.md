@@ -145,7 +145,7 @@ Copyright (c) 2026 Arihant Bharanidharan. All Rights Reserved.
 
 This project is licensed under the PolyForm Noncommercial License 1.0.0.
 
-You may use, study, modify, and share this project only for noncommercial purposes under the terms of the LICENSE file. Commercial use requires prior written permission.
+You may use, study and share this project only for noncommercial purposes under the terms of the LICENSE file. Commercial use requires prior written permission.
 
 Redistribution must preserve copyright notices, license terms, attribution, and the NOTICE file.
 
